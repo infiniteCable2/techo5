@@ -614,9 +614,13 @@ func (c *conversation) handle(e event) {
 func (c *conversation) turnEvent(e event) {
 	switch e.kind {
 	case evClawActivity:
-		if c.nativeTalk() { c.showNativeActivity() }
+		if c.nativeTalk() {
+			c.showNativeActivity()
+		}
 	case evClawActivityEnd:
-		if c.nativeTalk() { c.nativeActivityEnded() }
+		if c.nativeTalk() {
+			c.nativeActivityEnded()
+		}
 	case evClawClear:
 		c.nativeSpeaking = false
 		c.nativeAudible = false

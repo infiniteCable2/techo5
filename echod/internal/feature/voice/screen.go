@@ -9,7 +9,7 @@ import "github.com/HuskerMinion/techo5/echod/internal/lib/hook"
 // Phase is the conversation's own name for it: idle, listening, thinking, replying. Heard and Reply
 // are kept through the idle that follows a turn, so whoever shows them can let them linger.
 type State struct {
-	NativeStatus string // optional negotiated native progress; never playback authority
+	NativeStatus     string // optional negotiated native progress; never playback authority
 	Phase            string
 	Heard            string
 	Reply            string

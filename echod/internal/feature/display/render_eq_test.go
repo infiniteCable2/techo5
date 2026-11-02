@@ -17,10 +17,14 @@ func TestNativeActivityLabelPreservesShowAndShow8ControlPhase(t *testing.T) {
 		for _, label := range []string{"Processing…", "Transcribing…", "Waiting…", "Thinking…"} {
 			s := scene{phase: "thinking", nativeStatus: label, eq: &eqView{}}
 			lines := r.eqWords(s, panel.high, panel.wide)
-			if len(lines) != 1 || lines[0].text != label || s.phase != "thinking" { t.Fatal("native progress changed control phase or retained inferred label", label) }
+			if len(lines) != 1 || lines[0].text != label || s.phase != "thinking" {
+				t.Fatal("native progress changed control phase or retained inferred label", label)
+			}
 		}
 		lines := r.eqWords(scene{phase: "thinking", eq: &eqView{}}, panel.high, panel.wide)
-		if len(lines) != 1 || lines[0].text != "Thinking…" { t.Fatal("legacy label changed") }
+		if len(lines) != 1 || lines[0].text != "Thinking…" {
+			t.Fatal("legacy label changed")
+		}
 	}
 }
 

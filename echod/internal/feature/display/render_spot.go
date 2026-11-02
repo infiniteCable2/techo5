@@ -67,7 +67,7 @@ func (r *roundRenderer) timeLine(now time.Time, baseline int) {
 
 type roundScene struct {
 	nativeStatus string
-	pin pinView // the settings lock's PIN pad (pin.go), over everything but a call or a ring
+	pin          pinView // the settings lock's PIN pad (pin.go), over everything but a call or a ring
 	// The dashboard face: whether it is up, how it is shown, and what it shows.
 	showDash   bool
 	dashMode   config.DashboardMode
@@ -568,7 +568,9 @@ func (r *roundRenderer) conversation(s roundScene) {
 		title, col = "Listening", colListening
 	case "thinking":
 		title, col = "Thinking", colThinking
-		if s.nativeStatus != "" { title = s.nativeStatus }
+		if s.nativeStatus != "" {
+			title = s.nativeStatus
+		}
 	}
 	y := 150
 	if title != "" {

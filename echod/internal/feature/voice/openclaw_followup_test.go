@@ -21,17 +21,17 @@ import (
 // keyed by the returned logical Talk id, and close destroys that question.
 // It neither supplies a permission cache nor asserts server policy behavior.
 type followupGateway struct {
-	mu         sync.Mutex
-	calls      []clawCall
-	ends       chan string
-	closes     chan string
-	serial     int
-	connection uint64
-	ready      bool
-	pending    map[string]bool
-	confirmed  bool
-	input      map[string][]byte
-	failAppend bool
+	mu             sync.Mutex
+	calls          []clawCall
+	ends           chan string
+	closes         chan string
+	serial         int
+	connection     uint64
+	ready          bool
+	pending        map[string]bool
+	confirmed      bool
+	input          map[string][]byte
+	failAppend     bool
 	activityEvents bool
 }
 

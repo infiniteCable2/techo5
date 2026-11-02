@@ -26,8 +26,8 @@ type talkGateway interface {
 }
 
 type clawInput struct {
-	audio []byte
-	end   bool
+	audio     []byte
+	end       bool
 	captureID string
 }
 type clawOutput struct {
@@ -437,7 +437,9 @@ func (b *clawBackend) emitFrom(t *clawTurn, fence clawFence, e event) {
 	current := b.matchesFence(t, fence)
 	e.clawGeneration = fence.generation
 	post := b.post
-	if e.kind == evClawActivity || e.kind == evClawActivityEnd { post = b.observe }
+	if e.kind == evClawActivity || e.kind == evClawActivityEnd {
+		post = b.observe
+	}
 	b.mu.Unlock()
 	if current && post != nil {
 		post(e)
@@ -465,7 +467,9 @@ func (b *clawBackend) transmit(t *clawTurn) {
 		"mode": "stt-tts", "transport": "gateway-relay", "brain": "agent-consult", "sessionKey": b.key,
 	}
 	capabilities := []string{"activity-v1"}
-	if b.wantTimings { capabilities = append(capabilities, "output-word-timings") }
+	if b.wantTimings {
+		capabilities = append(capabilities, "output-word-timings")
+	}
 	params["capabilities"] = capabilities
 	err := b.client.Call(t.ctx, "talk.session.create", params, &created)
 	if err != nil {
@@ -505,7 +509,9 @@ func (b *clawBackend) transmit(t *clawTurn) {
 	earlyActivity := t.earlyActivity
 	t.earlyActivity = nil
 	b.mu.Unlock()
-	for _, raw := range earlyActivity { b.receive(raw) }
+	for _, raw := range earlyActivity {
+		b.receive(raw)
+	}
 	// Hardware services can fail independently; acknowledge only an acquired sink.
 	// This is readiness, never physical delivery of future audio.
 	if !b.playbackReady() {
@@ -531,7 +537,9 @@ func (b *clawBackend) transmit(t *clawTurn) {
 				return
 			}
 			params := map[string]any{"sessionId": created.ID, "audioBase64": base64.StdEncoding.EncodeToString(input.audio)}
-			if created.Audio.ActivityEvents { params["captureId"] = input.captureID }
+			if created.Audio.ActivityEvents {
+				params["captureId"] = input.captureID
+			}
 			if input.end {
 				params["endOfInput"] = true
 			}
@@ -588,10 +596,10 @@ func (b *clawBackend) receive(raw json.RawMessage) {
 		TranscriptID string `json:"transcriptId"`
 		TalkEvent    struct {
 			SessionID string `json:"sessionId"`
-			Seq uint64 `json:"seq"`
+			Seq       uint64 `json:"seq"`
 			CaptureID string `json:"captureId"`
-			Type    string `json:"type"`
-			Payload struct {
+			Type      string `json:"type"`
+			Payload   struct {
 				Text        string `json:"text"`
 				Purpose     string `json:"purpose"`
 				TextBlockID string `json:"textBlockId"`
