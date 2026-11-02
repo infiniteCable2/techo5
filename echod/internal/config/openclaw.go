@@ -9,6 +9,8 @@ type OpenClaw struct {
 	BootstrapTokenFile string `json:"bootstrap_token_file,omitempty"`
 	BootstrapRole      string `json:"bootstrap_role,omitempty"`
 	OutputWordTimings  bool   `json:"output_word_timings,omitempty"`
+	// Explicitly request write authority for a separately approved personal agent.
+	PersonalAgentAccess bool `json:"personal_agent_access,omitempty"`
 }
 
 // Enabled deliberately remains true for incomplete configuration: a selected but

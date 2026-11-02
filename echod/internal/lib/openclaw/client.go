@@ -19,7 +19,10 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-type Config struct{ URL, StateDir, DisplayName, BootstrapTokenFile, BootstrapRole string }
+type Config struct {
+	URL, StateDir, DisplayName, BootstrapTokenFile, BootstrapRole string
+	PersonalAgentAccess                                           bool
+}
 type Event struct{ Payload json.RawMessage }
 type frame struct {
 	Type    string          `json:"type"`
@@ -291,6 +294,40 @@ func (conn *connection) write(value any) error {
 	return conn.socket.WriteJSON(value)
 }
 
+func (c *Client) roleScopes(role string) []string {
+	if role != "operator" {
+		return []string{}
+	}
+	scopes := []string{"operator.read", "operator.talk"}
+	if c.config.PersonalAgentAccess {
+		scopes = append(scopes, "operator.write")
+	}
+	return scopes
+}
+
+// Receipt order may vary; duplicates, missing and additional scopes may not.
+func (c *Client) exactRoleScopes(role string, scopes []string) bool {
+	if role != "operator" && role != "node" {
+		return false
+	}
+	want := c.roleScopes(role)
+	if len(scopes) != len(want) {
+		return false
+	}
+	seen := make(map[string]bool, len(scopes))
+	for _, scope := range scopes {
+		allowed := false
+		for _, expected := range want {
+			allowed = allowed || scope == expected
+		}
+		if !allowed || seen[scope] {
+			return false
+		}
+		seen[scope] = true
+	}
+	return true
+}
+
 func (c *Client) handshake(conn *connection, role string) error {
 	conn.socket.SetReadDeadline(time.Now().Add(15 * time.Second))
 	var challenge frame
@@ -307,12 +344,7 @@ func (c *Client) handshake(conn *connection, role string) error {
 	if delta := time.Now().UnixMilli() - payload.TS; delta > 120000 || delta < -120000 {
 		return codeError("CHALLENGE_CLOCK_SKEW")
 	}
-	scopes := []string{}
-	if role == "operator" {
-		// Native Talk RPCs need talk; the Gateway's talk.event broadcast also
-		// requires read, including targeted audio and terminal error events.
-		scopes = []string{"operator.read", "operator.talk"}
-	}
+	scopes := c.roleScopes(role)
 	raw, err := privateFile(filepath.Join(c.config.StateDir, role+".token"))
 	if err != nil && !os.IsNotExist(err) {
 		return codeError("INVALID_TOKEN_FILE")
@@ -399,15 +431,8 @@ func (c *Client) handshake(conn *connection, role string) error {
 	if json.Unmarshal(response.Payload, &hello) != nil || hello.Type != "hello-ok" || hello.Protocol != 4 || hello.Auth.Role != role {
 		return codeError("INVALID_HELLO")
 	}
-	seen := make(map[string]bool, len(hello.Auth.Scopes))
-	for _, scope := range hello.Auth.Scopes {
-		if role != "operator" || (scope != "operator.read" && scope != "operator.talk") || seen[scope] {
-			return codeError("UNEXPECTED_ROLE_SCOPES")
-		}
-		seen[scope] = true
-	}
-	if role == "operator" && (!seen["operator.read"] || !seen["operator.talk"]) {
-		return codeError("MISSING_OPERATOR_SCOPE")
+	if !c.exactRoleScopes(role, hello.Auth.Scopes) {
+		return codeError("UNEXPECTED_ROLE_SCOPES")
 	}
 	c.tokenMu.Lock()
 	defer c.tokenMu.Unlock()
@@ -423,10 +448,7 @@ func (c *Client) handshake(conn *connection, role string) error {
 			return codeError("UNEXPECTED_COMPANION_GRANT")
 		}
 		grant := hello.Auth.DeviceTokens[0]
-		grantScopesOK := len(grant.Scopes) == 0
-		if companionRole == "operator" {
-			grantScopesOK = len(grant.Scopes) == 2 && ((grant.Scopes[0] == "operator.read" && grant.Scopes[1] == "operator.talk") || (grant.Scopes[1] == "operator.read" && grant.Scopes[0] == "operator.talk"))
-		}
+		grantScopesOK := c.exactRoleScopes(companionRole, grant.Scopes)
 		if grant.Role != companionRole || !grantScopesOK || !validToken(grant.DeviceToken) || grant.DeviceToken == hello.Auth.DeviceToken {
 			return codeError("UNEXPECTED_COMPANION_GRANT")
 		}

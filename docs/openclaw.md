@@ -25,8 +25,10 @@ can send RPCs while all those replies are filtered. Read is a Gateway-wide read
 grant, not a Talk-only permission, and requires explicit operator approval.
 The client accepts exactly those two operator scopes, rejects duplicates or
 additional grants, forwards only Talk events and exposes only Talk RPC calls.
-No admin, general write or secret scope is requested. Tool authority remains
-subject to native Talk policy and this scope set.
+By default no admin, write or secret scope is requested. The explicit personal
+agent opt-in described below additionally requires `operator.write`; it never
+requests admin. Tool authority remains subject to native Talk policy and the
+independently approved scope set.
 
 Each local turn creates the following native media session:
 
@@ -120,6 +122,7 @@ Echo's limited RAM. The connections require no new inbound device port.
 4. Confirm both role-token files and readiness. Remove the bootstrap file and
    its config reference and `bootstrap_role`, restart and verify readiness using
    only the role tokens.
+
    A successfully delivered bootstrap hello consumes the setup credential before
    local token persistence is acknowledged. If persistence fails, stop and have
    the owner issue a fresh operator-only credential; do not replay the old one.
@@ -134,6 +137,40 @@ is device-local and excluded from settings exchange; imports cannot redirect
 the paired device. Leave upstream automatic firmware installation disabled
 while testing a custom binary, since an upstream update would replace it.
 The code does not redirect updates to an unverified feed.
+
+### Optional personal agent access
+
+The device-local `openclaw.personal_agent_access` option defaults to `false`.
+Only an explicit operator choice of `true` requests exactly `operator.read`,
+`operator.talk`, and `operator.write`. This selects the scope request; it does
+not establish a person/agent binding or grant any server rights. The Gateway
+must independently approve the exact device identity and personal access.
+Node scopes remain empty and its commands remain empty. Admin, other scopes,
+duplicates and missing scopes are rejected, including bootstrap companion grants.
+The same option and client serve Show and Dot.
+
+Provisioning must coordinate the selected local mode with native server grants
+and, if required, an explicitly authorized operator-token renewal. A standard
+read/talk bootstrap profile cannot provision the write-enabled mode unless the
+native server contract explicitly supplies that approved scope set. Existing
+cached-token rejection never triggers bootstrap fallback, automatic grants or
+silent downgrade. Retain device identity and the Node credential; changing the
+option requires restarting/reconnecting the client under operator supervision.
+Switching back to the default also requires matching server credentials and
+an exact read/talk receipt; the client never accepts leftover write authority.
+Settings export/import cannot copy this option to another device. This work
+does not enable direct device-side non-Talk RPCs or bypass native tool policy.
+
+For an existing enrollment, the Gateway owner must first verify the public device
+identity, linked person, target agent and exact approved read/talk/write scope set.
+Coordinate the flag change with native operator-token rotation if the existing
+token cannot authenticate that set. Preserve the device key and Node token.
+Installing a replacement operator token or deliberately setting aside the old
+one for an operator-only bootstrap is a separate, supervised provisioning action;
+the client performs neither. Keep a protected recovery copy until a reconnect
+using only the intended role tokens succeeds. An absent or rejected write grant
+must stop enrollment rather than change the selected mode. A person/profile
+binding alone is not a substitute for native operation scope approval.
 
 ## Native turn timing and ring
 

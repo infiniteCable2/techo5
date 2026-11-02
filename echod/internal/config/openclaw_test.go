@@ -9,11 +9,12 @@ import (
 func TestOpenClawBindingStaysOnItsOwnDevice(t *testing.T) {
 	c := Defaults()
 	c.OpenClaw = OpenClaw{URL: "wss://gateway.example", SessionKey: "device-private-conversation", StateDir: "/private/device-state", BootstrapTokenFile: "/private/bootstrap"}
+	c.OpenClaw.PersonalAgentAccess = true
 	data, err := Export(c, "test", "local")
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, private := range []string{"gateway.example", "device-private-conversation", "/private/"} {
+	for _, private := range []string{"gateway.example", "device-private-conversation", "/private/", "personal_agent_access"} {
 		if strings.Contains(string(data), private) {
 			t.Fatal("paired OpenClaw binding was exported")
 		}

@@ -1,8 +1,21 @@
-# Local candidate verification, 2026-10-26
+# Native Echo Talk verification
+
+The shared Show/Dot source now includes the subsequent local wake/VAD, ring,
+display, network and long-output fixes, plus optional personal agent access.
+Before source publication on 2026-11-02, native race-enabled tests passed for
+`internal/lib/openclaw`, `internal/config` and `internal/feature/voice`: 325
+test/subtest results for Show and 325 for Dot, without failures. Both ARMv7
+variants built with Go 1.26.10, CGO disabled, and their exact source inputs were
+verified before and after compilation. Binary/ABI/source manifests and device
+configuration stay private. Personal access is disabled by default; server
+approval and supervised credential provisioning are separate from publication.
+The new personal-access binaries have not been installed or acoustically tested.
+
+## Historical candidate verification, 2026-10-26
 
 This record covers the working-tree OpenClaw Talk implementation, based on
 TECHO5 main `0255657fd4b7f282bf3415db607665e20780a075` and the sibling Dot main
-`b026039c75777197fdb901b8b1a1c55a8c7ed80c`. Changes are not committed/pushed.
+`b026039c75777197fdb901b8b1a1c55a8c7ed80c`. At that time changes were not committed/pushed.
 No Gateway, model or physical device was contacted for speech tests.
 
 ## Echo checks

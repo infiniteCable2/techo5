@@ -557,8 +557,14 @@ func TestReadScopedTalkEventDelivery(t *testing.T) {
 }
 
 func TestRejectedCachedOperatorTokenNeverFallsBackToSetupToken(t *testing.T) {
+	t.Run("default", func(t *testing.T) { testRejectedCachedOperatorToken(t, false) })
+	t.Run("personal", func(t *testing.T) { testRejectedCachedOperatorToken(t, true) })
+}
+
+func testRejectedCachedOperatorToken(t *testing.T, personal bool) {
 	url, offers := mockGateway(t)
 	c := newTestClient(t, url)
+	c.config.PersonalAgentAccess = personal
 	bootstrap := filepath.Join(c.config.StateDir, "bootstrap")
 	c.config.BootstrapTokenFile = bootstrap
 	for name, value := range map[string]string{"bootstrap": "synthetic-setup", "node.token": "synthetic-node", "operator.token": "synthetic-stale-operator"} {

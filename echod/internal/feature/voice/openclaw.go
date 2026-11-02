@@ -124,7 +124,8 @@ func (b *clawBackend) run(ctx context.Context) error {
 		state = filepath.Join(layout.StateDir, "openclaw")
 	}
 	client, err := gw.New(gw.Config{URL: cfg.OpenClaw.URL, StateDir: state,
-		DisplayName: "OpenClaw Echo", BootstrapTokenFile: cfg.OpenClaw.BootstrapTokenFile, BootstrapRole: cfg.OpenClaw.BootstrapRole})
+		DisplayName: "OpenClaw Echo", BootstrapTokenFile: cfg.OpenClaw.BootstrapTokenFile, BootstrapRole: cfg.OpenClaw.BootstrapRole,
+		PersonalAgentAccess: cfg.OpenClaw.PersonalAgentAccess})
 	if err != nil {
 		return err
 	}
