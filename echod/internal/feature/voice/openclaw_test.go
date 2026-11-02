@@ -24,6 +24,7 @@ type fakeClaw struct {
 	closed      chan struct{}
 	ready       bool
 	supportsEnd bool
+	activityEvents bool
 	events      chan gw.Event
 }
 
@@ -42,7 +43,7 @@ func (f *fakeClaw) Call(ctx context.Context, method string, params any, result a
 			}
 		}
 		data, _ := json.Marshal(map[string]any{"sessionId": "test-session", "readyMark": "media-ready:test", "audio": map[string]any{
-			"inputEncoding": "pcm16", "inputSampleRateHz": 16000, "outputEncoding": "pcm16", "outputSampleRateHz": 24000, "supportsInputEnd": f.supportsEnd,
+		"inputEncoding": "pcm16", "inputSampleRateHz": 16000, "outputEncoding": "pcm16", "outputSampleRateHz": 24000, "supportsInputEnd": f.supportsEnd, "activityEvents": f.activityEvents,
 		}})
 		return json.Unmarshal(data, result)
 	}

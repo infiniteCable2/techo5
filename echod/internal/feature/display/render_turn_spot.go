@@ -47,7 +47,9 @@ func (r *roundRenderer) turnFace(s roundScene) {
 		r.centered(r.body, "Listening…", y, colListening)
 		return
 	case "thinking":
-		r.centered(r.body, "Thinking…", y, colThinking)
+		label := "Thinking…"
+		if s.nativeStatus != "" { label = s.nativeStatus }
+		r.centered(r.body, label, y, colThinking)
 		y += 36
 	}
 	answer := s.reply != "" && (s.phase == "replying" || s.phase == "lingering")

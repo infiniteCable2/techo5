@@ -34,7 +34,9 @@ func (r *renderer) eqWords(s scene, room, maxW int) []eqLine {
 	case "listening":
 		out = append(out, eqLine{r.small, "Listening…", accent, r.s(42)})
 	case "thinking":
-		out = append(out, eqLine{r.small, "Thinking…", accent, r.s(42)})
+		label := "Thinking…"
+		if s.nativeStatus != "" { label = s.nativeStatus }
+		out = append(out, eqLine{r.small, label, accent, r.s(42)})
 	}
 	if s.heard != "" && s.phase != "listening" {
 		for _, l := range r.wrap(r.small, "“"+s.heard+"”", maxW) {

@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -27,6 +28,7 @@ type talkGateway interface {
 type clawInput struct {
 	audio []byte
 	end   bool
+	captureID string
 }
 type clawOutput struct {
 	event event
@@ -37,6 +39,9 @@ type clawTurn struct {
 	captions      clawCaptions
 	timings       *gw.WordTimings
 	earlyReady    []json.RawMessage
+	earlyActivity []json.RawMessage
+	activity      clawActivity
+	captureID     string
 	ctx           context.Context
 	cancel        context.CancelFunc
 	generation    int
@@ -90,6 +95,7 @@ type clawBackend struct {
 	gen           int
 	turn          *clawTurn
 	post          func(event)
+	observe       func(event) // best-effort progress must not block required audio delivery
 	playbackReady func() bool
 	wantTimings   bool
 }
@@ -183,6 +189,7 @@ func (b *clawBackend) startInputFrom(gen int, followUp bool, selected ...config.
 	// deadline here would cut off a healthy long reply, including buffered audio.
 	ctx, cancel := context.WithCancel(b.ctx)
 	t := &clawTurn{ctx: ctx, cancel: cancel, generation: b.gen, input: make(chan clawInput, 750), outputWake: make(chan struct{}, 1)}
+	t.captureID = fmt.Sprintf("echo-input-%d", b.gen)
 	t.connection = b.connectionGeneration()
 	if len(selected) == 1 {
 		admitted := selected[0]
@@ -220,6 +227,8 @@ func (b *clawBackend) keepForFollowUp() bool {
 	t.inputEnded, t.outputEnded = false, false
 	b.gen++
 	t.generation = b.gen
+	t.captureID = fmt.Sprintf("echo-input-%d", b.gen)
+	t.activity.nextCapture()
 	t.followUpReady = true
 	t.output, t.outputAt, t.outputSpeech = nil, time.Time{}, false
 	t.outputEpoch++ // revoke posted audio/end events from the completed reply
@@ -254,6 +263,15 @@ func (b *clawBackend) queueOutputFrom(t *clawTurn, fence clawFence, events ...ev
 		b.mu.Unlock()
 		return
 	}
+	if len(events) == 1 && events[0].kind == evClawActivityEnd {
+		// A lost observation keeps the watchdog. It must never turn an otherwise
+		// valid full audio backlog into a required-output overflow failure.
+		if !t.activity.view().settled || t.activity.settlementQueued || len(t.output) >= clawOutputLimit {
+			b.mu.Unlock()
+			return
+		}
+		t.activity.settlementQueued = true
+	}
 	if len(events) == 1 && events[0].kind == evClawSpeaking && t.outputSpeech {
 		b.mu.Unlock()
 		return
@@ -266,6 +284,7 @@ func (b *clawBackend) queueOutputFrom(t *clawTurn, fence clawFence, events ...ev
 	for _, e := range events {
 		if e.kind == evClawClear {
 			t.output = nil
+			t.activity.settlementQueued = false
 			t.outputEnded = false
 			t.outputAt = time.Time{}
 			t.outputEpoch++
@@ -386,6 +405,7 @@ func (b *clawBackend) enqueue(input clawInput) error {
 	if b.turn.inputEnded {
 		return nil
 	}
+	input.captureID = b.turn.captureID
 	select {
 	case b.turn.input <- input:
 		if input.end {
@@ -417,8 +437,9 @@ func (b *clawBackend) emitFrom(t *clawTurn, fence clawFence, e event) {
 	current := b.matchesFence(t, fence)
 	e.clawGeneration = fence.generation
 	post := b.post
+	if e.kind == evClawActivity || e.kind == evClawActivityEnd { post = b.observe }
 	b.mu.Unlock()
-	if current {
+	if current && post != nil {
 		post(e)
 	}
 }
@@ -429,6 +450,7 @@ func (b *clawBackend) transmit(t *clawTurn) {
 		ID                string                    `json:"sessionId"`
 		ReadyMark         string                    `json:"readyMark"`
 		Audio             struct {
+			ActivityEvents   bool   `json:"activityEvents"`
 			InputEncoding    string `json:"inputEncoding"`
 			InputRate        int    `json:"inputSampleRateHz"`
 			OutputEncoding   string `json:"outputEncoding"`
@@ -442,9 +464,9 @@ func (b *clawBackend) transmit(t *clawTurn) {
 	params := map[string]any{
 		"mode": "stt-tts", "transport": "gateway-relay", "brain": "agent-consult", "sessionKey": b.key,
 	}
-	if b.wantTimings {
-		params["capabilities"] = []string{"output-word-timings"}
-	}
+	capabilities := []string{"activity-v1"}
+	if b.wantTimings { capabilities = append(capabilities, "output-word-timings") }
+	params["capabilities"] = capabilities
 	err := b.client.Call(t.ctx, "talk.session.create", params, &created)
 	if err != nil {
 		fail("talk.session.create")
@@ -467,6 +489,7 @@ func (b *clawBackend) transmit(t *clawTurn) {
 		return
 	}
 	t.id = created.ID
+	t.activity.supported = created.Audio.ActivityEvents
 	if b.wantTimings && created.OutputWordTimings != nil && created.OutputWordTimings.Accepted {
 		t.timings = gw.NewWordTimings(created.ID, "", *created.OutputWordTimings)
 		if t.timings == nil {
@@ -479,7 +502,10 @@ func (b *clawBackend) transmit(t *clawTurn) {
 		}
 	}
 	t.earlyReady = nil
+	earlyActivity := t.earlyActivity
+	t.earlyActivity = nil
 	b.mu.Unlock()
+	for _, raw := range earlyActivity { b.receive(raw) }
 	// Hardware services can fail independently; acknowledge only an acquired sink.
 	// This is readiness, never physical delivery of future audio.
 	if !b.playbackReady() {
@@ -505,6 +531,7 @@ func (b *clawBackend) transmit(t *clawTurn) {
 				return
 			}
 			params := map[string]any{"sessionId": created.ID, "audioBase64": base64.StdEncoding.EncodeToString(input.audio)}
+			if created.Audio.ActivityEvents { params["captureId"] = input.captureID }
 			if input.end {
 				params["endOfInput"] = true
 			}
@@ -560,6 +587,9 @@ func (b *clawBackend) receive(raw json.RawMessage) {
 		Final        bool   `json:"final"`
 		TranscriptID string `json:"transcriptId"`
 		TalkEvent    struct {
+			SessionID string `json:"sessionId"`
+			Seq uint64 `json:"seq"`
+			CaptureID string `json:"captureId"`
 			Type    string `json:"type"`
 			Payload struct {
 				Text        string `json:"text"`
@@ -581,6 +611,9 @@ func (b *clawBackend) receive(raw json.RawMessage) {
 	}
 	if !matches && b.wantTimings && t != nil && t.id == "" && e.Type == "ready" && len(raw) <= 4096 && len(t.earlyReady) < 2 {
 		t.earlyReady = append(t.earlyReady, append(json.RawMessage(nil), raw...))
+	}
+	if !matches && t != nil && t.id == "" && e.Type == "event" && (e.TalkEvent.Type == "session.activity" || e.TalkEvent.Type == "input.outcome") && len(raw) <= 4096 && len(t.earlyActivity) < 8 {
+		t.earlyActivity = append(t.earlyActivity, append(json.RawMessage(nil), raw...))
 	}
 	b.mu.Unlock()
 	if !matches {
@@ -632,6 +665,8 @@ func (b *clawBackend) receive(raw json.RawMessage) {
 		emit(event{kind: evError, code: "openclaw-closed"})
 	case "event":
 		switch e.TalkEvent.Type {
+		case "session.activity", "input.outcome":
+			b.receiveActivity(t, fence, raw)
 		case "output.text.delta", "output.text.done":
 			if !presentation.canonical {
 				p := e.TalkEvent.Payload

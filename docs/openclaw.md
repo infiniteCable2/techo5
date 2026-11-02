@@ -56,6 +56,20 @@ disconnect, failed follow-up admission, or a deliberate new conversation closes
 the logical Talk session. Persistent history under the session key alone is not
 a substitute for that live logical session.
 
+The client also requests the additive `activity-v1` capability. A matching Core
+declares `audio.activityEvents: true`; otherwise the existing display and timeout
+fallback remains. Each capture has one `captureId` on all PCM appends and its end
+boundary, including a fresh ID for a connected follow-up. Sequenced
+`session.activity` observations distinguish transcription, queued work and running
+work; `input.outcome` settles a known completed capture, including a transcribed
+request with no spoken output, only
+after a newer aggregate confirms that input, work and output producers are quiet.
+Old captures and per-utterance outcomes cannot end the current capture. Missing,
+unknown or malformed observations retain the normal watchdog. This telemetry
+adds no requests, retries, model context or authority. It does not claim that
+submitted PCM has sounded: queued audio and the local speaker drain still own
+playback completion and follow-up admission.
+
 ## Required matching Core and provider
 
 Use the Core candidate described in

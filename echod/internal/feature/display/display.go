@@ -2567,7 +2567,7 @@ func (d *Display) frame() (next time.Duration) {
 		return 80 * time.Millisecond
 	}
 
-	s := scene{now: now, phase: view.Phase, heard: view.Heard, reply: view.Reply, playbackKnown: view.PlaybackKnown, speaking: view.Speaking, replyCursorKnown: view.ReplyCursorKnown, replyCursor: view.ReplyCursor, since: at, ring: ring, call: call}
+	s := scene{now: now, phase: view.Phase, nativeStatus: view.NativeStatus, heard: view.Heard, reply: view.Reply, playbackKnown: view.PlaybackKnown, speaking: view.Speaking, replyCursorKnown: view.ReplyCursorKnown, replyCursor: view.ReplyCursor, since: at, ring: ring, call: call}
 	s.atDoor = call.Phase != phone.Idle && doorbell.Get().AtDoor(now)
 	s.snooze = config.Get().Alarms.Snooze()
 	s.alarms = alarm.Get().View(now)

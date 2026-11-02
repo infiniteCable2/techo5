@@ -1429,6 +1429,7 @@ func (d *Display) frame() (next time.Duration) {
 	s := roundScene{
 		now:       now,
 		phase:     view.Phase,
+		nativeStatus: view.NativeStatus,
 		heard:     view.Heard,
 		reply:     view.Reply,
 		menuOpen:  d.menuOpen,
