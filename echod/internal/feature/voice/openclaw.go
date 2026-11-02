@@ -32,21 +32,27 @@ type clawOutput struct {
 	event event
 	epoch int
 }
+type clawFence struct{ generation, epoch int }
 type clawTurn struct {
-	captions     clawCaptions
-	timings      *gw.WordTimings
-	earlyReady   []json.RawMessage
-	ctx          context.Context
-	cancel       context.CancelFunc
-	generation   int
-	id           string
-	input        chan clawInput
-	inputEnded   bool
-	output       []clawOutput // bounded transport backlog; never claimed as played audio
-	outputEpoch  int
-	outputSpeech bool
-	outputWake   chan struct{}
-	outputAt     time.Time // last accepted PCM, not a speech/status marker
+	captions      clawCaptions
+	timings       *gw.WordTimings
+	earlyReady    []json.RawMessage
+	ctx           context.Context
+	cancel        context.CancelFunc
+	generation    int
+	id            string
+	input         chan clawInput
+	inputEnded    bool
+	outputEnded   bool
+	followUpReady bool
+	connection    uint64
+	captionOffset int
+	selected      *config.OpenClaw
+	output        []clawOutput // bounded transport backlog; never claimed as played audio
+	outputEpoch   int
+	outputSpeech  bool
+	outputWake    chan struct{}
+	outputAt      time.Time // last accepted PCM, not a speech/status marker
 }
 
 // A bounded backlog, not a total reply limit. This also admits a two-minute
@@ -80,6 +86,7 @@ type clawBackend struct {
 	client        talkGateway
 	ctx           context.Context
 	key           string
+	route         config.OpenClaw
 	gen           int
 	turn          *clawTurn
 	post          func(event)
@@ -105,7 +112,7 @@ func (b *clawBackend) current(gen int) bool {
 func (b *clawBackend) currentPlayback(gen, epoch int) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.turn != nil && b.turn.generation == gen && b.turn.outputEpoch+1 == epoch && b.turn.ctx.Err() == nil
+	return b.turn != nil && b.turn.generation == gen && b.turn.outputEpoch+1 == epoch && b.turn.ctx.Err() == nil && (b.client == nil || b.sameConnection(b.turn)) && b.sameSource(b.turn)
 }
 
 func (b *clawBackend) run(ctx context.Context) error {
@@ -130,7 +137,7 @@ func (b *clawBackend) run(ctx context.Context) error {
 		return err
 	}
 	b.mu.Lock()
-	b.client, b.ctx, b.key = client, ctx, cfg.OpenClaw.SessionKey
+	b.client, b.ctx, b.key, b.route = client, ctx, cfg.OpenClaw.SessionKey, cfg.OpenClaw
 	b.wantTimings = cfg.OpenClaw.OutputWordTimings
 	b.mu.Unlock()
 	safe.Go("OpenClaw Gateway", func() { _ = client.Run(ctx) })
@@ -140,13 +147,33 @@ func (b *clawBackend) run(ctx context.Context) error {
 
 func (b *clawBackend) Start(string) error { return b.startFrom(-1) }
 func (b *clawBackend) startFrom(gen int) error {
+	return b.startInputFrom(gen, false)
+}
+func (b *clawBackend) startInputFrom(gen int, followUp bool, selected ...config.OpenClaw) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if gen >= 0 && gen != b.gen {
 		return nil
 	}
+	if len(selected) == 1 && (config.Get().OpenClaw != selected[0] || selected[0].SessionKey != b.key || b.route.Enabled() && selected[0].URL != b.route.URL) {
+		return errors.New("OpenClaw selected source changed")
+	}
 	if b.client == nil || !b.client.Ready() || b.ctx == nil || b.ctx.Err() != nil {
 		return errors.New("OpenClaw node and Talk pairing are not ready")
+	}
+	if followUp && b.turn != nil && b.turn.followUpReady {
+		if b.turn.ctx.Err() != nil || !b.sameConnection(b.turn) {
+			return errors.New("OpenClaw follow-up connection changed")
+		}
+		if !b.playbackReady() {
+			return errors.New("OpenClaw follow-up playback is unavailable")
+		}
+		b.turn.followUpReady = false
+		if len(selected) == 1 {
+			admitted := selected[0]
+			b.turn.selected = &admitted
+		}
+		return nil
 	}
 	if b.turn != nil {
 		b.turn.cancel()
@@ -156,44 +183,110 @@ func (b *clawBackend) startFrom(gen int) error {
 	// deadline here would cut off a healthy long reply, including buffered audio.
 	ctx, cancel := context.WithCancel(b.ctx)
 	t := &clawTurn{ctx: ctx, cancel: cancel, generation: b.gen, input: make(chan clawInput, 750), outputWake: make(chan struct{}, 1)}
+	t.connection = b.connectionGeneration()
+	if len(selected) == 1 {
+		admitted := selected[0]
+		t.selected = &admitted
+	}
 	b.turn = t
 	safe.Go("OpenClaw turn", func() { b.transmit(t) })
 	safe.Go("OpenClaw playback transport", func() { b.playback(t) })
 	return nil
 }
 
+func (b *clawBackend) connectionGeneration() uint64 {
+	if client, ok := b.client.(interface{ ConnectionGeneration() uint64 }); ok {
+		return client.ConnectionGeneration()
+	}
+	return 0
+}
+func (b *clawBackend) sameConnection(t *clawTurn) bool {
+	return b.client != nil && b.client.Ready() && t.connection == b.connectionGeneration()
+}
+func (b *clawBackend) sameSource(t *clawTurn) bool {
+	return t.selected == nil || config.Get().OpenClaw == *t.selected
+}
+
+// Only the local player's completed drain can offer a connected follow-up.
+// Retiring the old send scope before this call keeps its final Audio/End from
+// crossing the new input boundary. The native Talk session and readiness stay.
+func (b *clawBackend) keepForFollowUp() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	t := b.turn
+	if t == nil || t.ctx.Err() != nil || t.id == "" || !t.inputEnded || !t.outputEnded || len(t.input) != 0 || !b.sameConnection(t) || !b.sameSource(t) || !b.playbackReady() {
+		return false
+	}
+	t.inputEnded, t.outputEnded = false, false
+	b.gen++
+	t.generation = b.gen
+	t.followUpReady = true
+	t.output, t.outputAt, t.outputSpeech = nil, time.Time{}, false
+	t.outputEpoch++ // revoke posted audio/end events from the completed reply
+	t.captions = clawCaptions{}
+	if t.timings != nil {
+		t.captionOffset = len([]rune(t.timings.Text()))
+		if t.captionOffset > 0 {
+			t.captionOffset += 2 // the native registry separates visible blocks by two newlines
+		}
+	}
+	return true
+}
+
 // queueOutput absorbs native TTS bursts without changing the existing player or
 // its acoustic settings. A clear revokes both queued and already posted chunks.
 func (b *clawBackend) queueOutput(t *clawTurn, e event) {
 	b.mu.Lock()
-	if b.turn != t || t.ctx.Err() != nil {
+	fence := clawFence{t.generation, t.outputEpoch}
+	b.mu.Unlock()
+	b.queueOutputFrom(t, fence, e)
+}
+
+func (b *clawBackend) matchesFence(t *clawTurn, fence clawFence) bool {
+	return b.turn == t && t.ctx.Err() == nil && t.generation == fence.generation && t.outputEpoch == fence.epoch
+}
+
+// A transport event owns its capture fence from decode through publication.
+// In particular the two turn.ended markers enter the backlog atomically.
+func (b *clawBackend) queueOutputFrom(t *clawTurn, fence clawFence, events ...event) {
+	b.mu.Lock()
+	if !b.matchesFence(t, fence) {
 		b.mu.Unlock()
 		return
 	}
-	if e.kind == evClawClear {
-		t.output = nil
-		t.outputAt = time.Time{}
-		t.outputEpoch++
-		t.outputSpeech = false
+	if len(events) == 1 && events[0].kind == evClawSpeaking && t.outputSpeech {
+		b.mu.Unlock()
+		return
 	}
-	if e.kind == evClawSpeaking {
-		if t.outputSpeech {
-			b.mu.Unlock()
-			return
+	if len(t.output)+len(events) > clawOutputLimit && (len(events) == 0 || events[0].kind != evClawClear) {
+		b.mu.Unlock()
+		b.emitFrom(t, fence, event{kind: evError, code: "openclaw-output-overflow"})
+		return
+	}
+	for _, e := range events {
+		if e.kind == evClawClear {
+			t.output = nil
+			t.outputEnded = false
+			t.outputAt = time.Time{}
+			t.outputEpoch++
+			t.outputSpeech = false
 		}
-		t.outputSpeech = true
-	}
-	if e.kind == evClawSilent {
-		t.outputSpeech = false
-	}
-	if len(t.output) >= clawOutputLimit {
-		b.mu.Unlock()
-		b.emit(t, event{kind: evError, code: "openclaw-output-overflow"})
-		return
-	}
-	t.output = append(t.output, clawOutput{e, t.outputEpoch + 1})
-	if e.kind == evStreamAudio && len(e.audio) > 0 {
-		t.outputAt = time.Now()
+		if e.kind == evClawSpeaking {
+			if t.outputSpeech {
+				continue
+			}
+			t.outputSpeech = true
+		}
+		if e.kind == evClawSilent {
+			t.outputSpeech = false
+		}
+		if e.kind == evStreamEnd {
+			t.outputEnded = true
+		}
+		t.output = append(t.output, clawOutput{e, t.outputEpoch + 1})
+		if e.kind == evStreamAudio && len(e.audio) > 0 {
+			t.outputAt = time.Now()
+		}
 	}
 	select {
 	case t.outputWake <- struct{}{}:
@@ -238,6 +331,7 @@ func (b *clawBackend) playback(t *clawTurn) {
 			}
 		}
 		out := t.output[0]
+		gen := t.generation
 		t.output[0] = clawOutput{}
 		t.output = t.output[1:]
 		b.mu.Unlock()
@@ -254,11 +348,11 @@ func (b *clawBackend) playback(t *clawTurn) {
 			case <-timer.C:
 			}
 		}
-		if !b.currentPlayback(t.generation, out.epoch) {
+		if !b.currentPlayback(gen, out.epoch) {
 			continue
 		}
 		out.event.clawPlayback = out.epoch
-		b.emit(t, out.event)
+		b.emitFrom(t, clawFence{gen, out.epoch - 1}, out.event)
 		if out.event.kind == evStreamAudio {
 			clock.advance(len(out.event.audio))
 		}
@@ -277,6 +371,15 @@ func (b *clawBackend) enqueue(input clawInput) error {
 	defer b.mu.Unlock()
 	if b.turn == nil || b.turn.ctx.Err() != nil {
 		return errors.New("OpenClaw turn is closed")
+	}
+	if b.client != nil && !b.sameConnection(b.turn) {
+		return errors.New("OpenClaw Talk connection changed")
+	}
+	if !b.sameSource(b.turn) {
+		return errors.New("OpenClaw selected source changed")
+	}
+	if b.turn.followUpReady {
+		return errors.New("OpenClaw follow-up input has not started")
 	}
 	// Capture may already have posted its last frame when the conversation queues
 	// End. Never reopen a committed input with that late frame or duplicate End.
@@ -304,9 +407,19 @@ func (b *clawBackend) Stop() error {
 	return nil
 }
 func (b *clawBackend) emit(t *clawTurn, e event) {
-	if b.current(t.generation) {
-		e.clawGeneration = t.generation
-		b.post(e)
+	b.mu.Lock()
+	fence := clawFence{t.generation, t.outputEpoch}
+	b.mu.Unlock()
+	b.emitFrom(t, fence, e)
+}
+func (b *clawBackend) emitFrom(t *clawTurn, fence clawFence, e event) {
+	b.mu.Lock()
+	current := b.matchesFence(t, fence)
+	e.clawGeneration = fence.generation
+	post := b.post
+	b.mu.Unlock()
+	if current {
+		post(e)
 	}
 }
 
@@ -384,6 +497,13 @@ func (b *clawBackend) transmit(t *clawTurn) {
 		case <-t.ctx.Done():
 			return
 		case input := <-t.input:
+			b.mu.Lock()
+			currentSource := b.sameSource(t)
+			b.mu.Unlock()
+			if !currentSource {
+				fail("OpenClaw selected source changed")
+				return
+			}
 			params := map[string]any{"sessionId": created.ID, "audioBase64": base64.StdEncoding.EncodeToString(input.audio)}
 			if input.end {
 				params["endOfInput"] = true
@@ -413,10 +533,11 @@ func (b *clawBackend) events(ctx context.Context) {
 					client.NetworkChanged()
 				}
 			}
-			if !b.client.Ready() {
-				b.mu.Lock()
-				t := b.turn
-				b.mu.Unlock()
+			b.mu.Lock()
+			t := b.turn
+			disconnected := t != nil && !b.sameConnection(t)
+			b.mu.Unlock()
+			if disconnected {
 				if t != nil {
 					b.emit(t, event{kind: evError, code: "openclaw-disconnected"})
 				}
@@ -451,7 +572,11 @@ func (b *clawBackend) receive(raw json.RawMessage) {
 	}
 	b.mu.Lock()
 	t := b.turn
-	matches := t != nil && t.id != "" && t.id == e.SessionID
+	matches := t != nil && t.id != "" && t.id == e.SessionID && (b.client == nil || b.sameConnection(t)) && b.sameSource(t)
+	var fence clawFence
+	if matches {
+		fence = clawFence{t.generation, t.outputEpoch}
+	}
 	if !matches && b.wantTimings && t != nil && t.id == "" && e.Type == "ready" && len(raw) <= 4096 && len(t.earlyReady) < 2 {
 		t.earlyReady = append(t.earlyReady, append(json.RawMessage(nil), raw...))
 	}
@@ -459,46 +584,50 @@ func (b *clawBackend) receive(raw json.RawMessage) {
 	if !matches {
 		return
 	}
-	presentation := b.presentation(t, raw)
+	emit := func(e event) { b.emitFrom(t, fence, e) }
+	queue := func(events ...event) { b.queueOutputFrom(t, fence, events...) }
+	presentation := b.presentation(t, raw, fence)
 	if presentation.drop {
 		return
 	}
 	if presentation.textChanged {
-		b.emit(t, event{kind: evClawCaption, text: presentation.text, canonical: true})
+		emit(event{kind: evClawCaption, text: presentation.text, canonical: true})
 	}
 	switch e.Type {
 	case "audio":
 		// The native relay emits at most 20 ms: 960 PCM16 bytes at 24 kHz.
 		// Bound memory by bytes as well as queue entries, even for a faulty peer.
 		if len(e.Audio) == 0 || len(e.Audio) > 1280 {
-			b.emit(t, event{kind: evError, code: "openclaw-audio"})
+			emit(event{kind: evError, code: "openclaw-audio"})
 			return
 		}
 		pcm, err := base64.StdEncoding.DecodeString(e.Audio)
 		if err != nil || len(pcm) == 0 || len(pcm) > 960 || len(pcm)%2 != 0 {
-			b.emit(t, event{kind: evError, code: "openclaw-audio"})
+			emit(event{kind: evError, code: "openclaw-audio"})
 			return
 		}
 		// Preserve the native 24 kHz samples. The reply's stateful converter takes
 		// them straight to the speaker rate, without the legacy 16 kHz voice path.
-		b.queueOutput(t, event{kind: evStreamAudio, audio: pcm, captionMark: presentation.mark})
+		queue(event{kind: evStreamAudio, audio: pcm, captionMark: presentation.mark})
 	case "transcript":
 		if e.Final && e.Role == "user" {
 			b.mu.Lock()
-			t.captions = clawCaptions{}
+			if b.matchesFence(t, fence) {
+				t.captions = clawCaptions{}
+			}
 			b.mu.Unlock()
-			b.emit(t, event{kind: evHeard, text: e.Text})
+			emit(event{kind: evHeard, text: e.Text})
 		}
 		if e.Role == "assistant" && !presentation.canonical {
-			b.caption(t, e.Text, e.TranscriptID, e.Final, e.TalkEvent.Type == "output.text.done")
+			b.caption(t, e.Text, e.TranscriptID, e.Final, e.TalkEvent.Type == "output.text.done", fence)
 		}
 		if e.Final && e.Role == "assistant" {
-			b.emit(t, event{kind: evReplyText, text: e.Text, canonical: presentation.canonical})
+			emit(event{kind: evReplyText, text: e.Text, canonical: presentation.canonical})
 		}
 	case "clear":
-		b.queueOutput(t, event{kind: evClawClear})
+		queue(event{kind: evClawClear})
 	case "close":
-		b.emit(t, event{kind: evError, code: "openclaw-closed"})
+		emit(event{kind: evError, code: "openclaw-closed"})
 	case "event":
 		switch e.TalkEvent.Type {
 		case "output.text.delta", "output.text.done":
@@ -506,25 +635,24 @@ func (b *clawBackend) receive(raw json.RawMessage) {
 				p := e.TalkEvent.Payload
 				if p.Purpose == "commentary" {
 					if p.BlockFinal && p.TextBlockID != "" {
-						b.caption(t, p.Text, p.TextBlockID, true, false)
+						b.caption(t, p.Text, p.TextBlockID, true, false, fence)
 					}
 				} else {
-					b.caption(t, p.Text, "", e.TalkEvent.Type == "output.text.done", e.TalkEvent.Type == "output.text.done")
+					b.caption(t, p.Text, "", e.TalkEvent.Type == "output.text.done", e.TalkEvent.Type == "output.text.done", fence)
 				}
 			}
 		case "transcript.delta":
 			if strings.TrimSpace(e.TalkEvent.Payload.Text) != "" {
-				b.emit(t, event{kind: evClawInputSpeech})
+				emit(event{kind: evClawInputSpeech})
 			}
 		case "output.audio.started", "output.audio.delta":
-			b.queueOutput(t, event{kind: evClawSpeaking})
+			queue(event{kind: evClawSpeaking})
 		case "output.audio.done":
-			b.queueOutput(t, event{kind: evClawSilent})
+			queue(event{kind: evClawSilent})
 		case "turn.ended":
-			b.queueOutput(t, event{kind: evStreamEnd})
-			b.queueOutput(t, event{kind: evRunEnd})
+			queue(event{kind: evStreamEnd}, event{kind: evRunEnd})
 		case "session.error":
-			b.emit(t, event{kind: evError, code: "openclaw-session"})
+			emit(event{kind: evError, code: "openclaw-session"})
 		}
 	}
 }

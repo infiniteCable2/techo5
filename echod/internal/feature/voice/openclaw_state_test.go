@@ -3,8 +3,6 @@ package voice
 import (
 	"context"
 	"encoding/json"
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -132,32 +130,13 @@ func TestNativeFollowupAcknowledgementCancelsTheOpeningGuard(t *testing.T) {
 }
 
 func TestNativeReplyOpensFollowupOnlyAfterLocalPlaybackCompletes(t *testing.T) {
-	c := thinkingTurn(t)
-	c.be = c.claw
-	c.claw.client = &fakeClaw{ready: true}
-	cfg := config.Get()
-	cfg.OpenClaw = config.OpenClaw{URL: "wss://gateway.example", SessionKey: "agent:example:voice:device-example"}
-	path := filepath.Join(t.TempDir(), "native-state.json")
-	body, err := json.Marshal(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, body, 0600); err != nil {
-		t.Fatal(err)
-	}
-	config.Use(path)
-	if err := config.Set().Wake(0).FollowUp(10); err != nil {
-		t.Fatal(err)
-	}
-	c.enter(phaseReplying)
-	c.reply = reply{id: 7}
+	c, _, _ := connectedReply(t)
 	c.lookHere = true // Native Talk is not blocked by the legacy page heuristic.
-	t.Cleanup(func() { c.handle(event{kind: evCancel}); streams.Wait() })
 	c.handle(event{kind: evRunEnd})
 	if c.phase != phaseReplying || c.pending != nil {
 		t.Fatal("server completion opened capture before local audio ended")
 	}
-	c.handle(event{kind: evPlayed, reply: 7, at: time.Now()})
+	c.handle(event{kind: evPlayed, reply: 41, at: time.Now()})
 	if c.phase != phaseListening || !c.followUp || c.woke || c.noSpeech == nil {
 		t.Fatal("finished answer did not open a keyword-free follow-up")
 	}

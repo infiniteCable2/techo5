@@ -18,9 +18,12 @@ type captionPresentation struct {
 	mark                         captionMark
 }
 
-func (b *clawBackend) presentation(t *clawTurn, raw json.RawMessage) captionPresentation {
+func (b *clawBackend) presentation(t *clawTurn, raw json.RawMessage, expected ...clawFence) captionPresentation {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if len(expected) == 1 && !b.matchesFence(t, expected[0]) {
+		return captionPresentation{drop: true}
+	}
 	if b.turn != t || t.timings == nil {
 		return captionPresentation{}
 	}
@@ -44,7 +47,8 @@ func (b *clawBackend) presentation(t *clawTurn, raw json.RawMessage) captionPres
 	}
 	if block != nil {
 		r.textChanged = true
-		r.text = t.timings.Text()
+		text := []rune(t.timings.Text())
+		r.text = string(text[min(t.captionOffset, len(text)):])
 	}
 	return r
 }
@@ -61,7 +65,8 @@ func (b *clawBackend) captionPosition(mark captionMark) (int, bool) {
 	if !mark.known || b.turn == nil || b.turn.timings == nil {
 		return 0, false
 	}
-	return b.turn.timings.AbsoluteAt(mark.generation, mark.sample)
+	position, ok := b.turn.timings.AbsoluteAt(mark.generation, mark.sample)
+	return max(0, position-b.turn.captionOffset), ok
 }
 
 type captionPlaybackRange struct {

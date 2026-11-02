@@ -42,16 +42,17 @@ type connection struct {
 	closed  bool
 }
 type Client struct {
-	config      Config
-	identity    identity
-	events      chan Event
-	mu          sync.Mutex
-	connections map[string]*connection
-	running     bool
-	attempts    map[string]context.CancelFunc
-	networkWake map[string]chan struct{}
-	sequence    atomic.Uint64
-	tokenMu     sync.Mutex // both role connections publish into one private state directory
+	config               Config
+	identity             identity
+	events               chan Event
+	mu                   sync.Mutex
+	connections          map[string]*connection
+	running              bool
+	attempts             map[string]context.CancelFunc
+	networkWake          map[string]chan struct{}
+	sequence             atomic.Uint64
+	connectionGeneration uint64     // guarded by mu; losing either role revokes the pair
+	tokenMu              sync.Mutex // both role connections publish into one private state directory
 }
 
 const heartbeatInterval = 15 * time.Second
@@ -90,6 +91,14 @@ func (c *Client) Ready() bool {
 	return c.connections["node"] != nil && c.connections["operator"] != nil
 }
 func (c *Client) Events() <-chan Event { return c.events }
+
+// ConnectionGeneration fences logical Talk sessions against even a reconnect
+// that completes between the device's readiness polls. It grants no authority.
+func (c *Client) ConnectionGeneration() uint64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.connectionGeneration
+}
 
 // Run reconnects each role independently. Pairing never grants additional scopes.
 func (c *Client) Run(ctx context.Context) error {
@@ -224,6 +233,7 @@ func (c *Client) serve(ctx context.Context, role string) error {
 	}()
 	c.mu.Lock()
 	c.connections[role] = conn
+	c.connectionGeneration++
 	c.mu.Unlock()
 	defer func() {
 		// Both transports describe one device. Losing either fences the complete
@@ -231,6 +241,7 @@ func (c *Client) serve(ctx context.Context, role string) error {
 		var peers []*connection
 		c.mu.Lock()
 		if c.connections[role] == conn {
+			c.connectionGeneration++
 			for other, peer := range c.connections {
 				delete(c.connections, other)
 				if peer != conn {

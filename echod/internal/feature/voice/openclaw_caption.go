@@ -57,9 +57,13 @@ func (c *clawCaptions) update(text, id string, final, summary bool) string {
 	return c.text()
 }
 
-func (b *clawBackend) caption(t *clawTurn, text, id string, final, summary bool) {
+func (b *clawBackend) caption(t *clawTurn, text, id string, final, summary bool, expected ...clawFence) {
 	b.mu.Lock()
-	if b.turn != t || b.gen != t.generation {
+	fence := clawFence{t.generation, t.outputEpoch}
+	if len(expected) == 1 {
+		fence = expected[0]
+	}
+	if !b.matchesFence(t, fence) {
 		b.mu.Unlock()
 		return
 	}
@@ -67,6 +71,6 @@ func (b *clawBackend) caption(t *clawTurn, text, id string, final, summary bool)
 	after := t.captions.update(text, id, final, summary)
 	b.mu.Unlock()
 	if before != after {
-		b.emit(t, event{kind: evClawCaption, text: after})
+		b.emitFrom(t, fence, event{kind: evClawCaption, text: after})
 	}
 }

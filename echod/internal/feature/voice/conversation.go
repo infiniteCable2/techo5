@@ -217,6 +217,7 @@ type conversation struct {
 	claim          *led.Claim
 	stopAudio      func()
 	clawSends      *clawSendScope
+	clawConfig     config.OpenClaw // selected route at capture admission
 	deadline       *time.Timer
 	noSpeech       *time.Timer
 	noSpeechUntil  time.Time
@@ -874,8 +875,6 @@ func (c *conversation) turnEvent(e event) {
 			// Realtime voice answers each turn in a session of its own, which would not know what was
 			// said before: no listening again after it.
 			_, rt := c.be.(*rtBackend)
-			c.idle("spoken", activity.Answered)
-
 			// Continual conversation: the slot keeps listening after every reply, not only the ones
 			// Home Assistant asked to continue - as many times in a row as the slot allows.
 			limit := wakeword.FollowUps(slot)
@@ -883,7 +882,18 @@ func (c *conversation) turnEvent(e event) {
 				slog.Info("listening again after the reply", "slot", slot+1, "for", wakeword.FollowUp(slot))
 				c.pending = &nextTurn{slot: slot, followUp: true}
 			}
+			keepTalk := c.nativeTalk() && c.pending != nil && c.pending.followUp && c.pending.slot == slot
+			eligibleTalk := keepTalk && !c.micBusy() && config.Get().OpenClaw == c.clawConfig
+			keptTalk := c.finish("spoken", activity.Answered, eligibleTalk)
+			if keepTalk && !keptTalk {
+				c.clearPending()
+			}
 			c.startPending()
+			// Admission can fail (mute, source change, unavailable microphone).
+			// An offered follow-up never leaves an idle logical Talk behind.
+			if keepTalk && (c.phase == phaseIdle || !c.nativeTalk()) {
+				_ = c.claw.Stop()
+			}
 		}
 
 	case evRunEnd:
@@ -1022,6 +1032,12 @@ func (c *conversation) muted() (bool, error) { return mute.Get().Muted() }
 // start opens a turn on the pipeline paired with a slot, and reports whether it did.
 func (c *conversation) start(n nextTurn) bool {
 	slot := n.slot
+	continuingTalk := n.followUp && c.nativeTalk()
+	selectedTalk := c.clawConfig
+	if continuingTalk && config.Get().OpenClaw != selectedTalk {
+		_ = c.claw.Stop()
+		return false
+	}
 
 	// A wake the device's own engine was sure of: the word is being said the way it hears it, so what
 	// is asked about next is not held back by the ones Home Assistant did not hear before.
@@ -1040,7 +1056,9 @@ func (c *conversation) start(n nextTurn) bool {
 	// Saying the wake word while the device is still listening is part of the sentence, not a new
 	// request: acting on it would cut off what the user is in the middle of saying. Once it is
 	// thinking or speaking, a wake word is a deliberate interruption and takes the turn over.
-	if c.phase == phaseListening {
+	// A manual native Start deliberately opens a new logical conversation even
+	// during follow-up listening; it cannot inherit the prior spoken challenge.
+	if c.phase == phaseListening && (!c.nativeTalk() || n.woke || n.followUp) {
 		slog.Info("wake word ignored, still listening", "slot", slot+1)
 		return false
 	}
@@ -1094,6 +1112,17 @@ func (c *conversation) start(n nextTurn) bool {
 	c.be = c.backendFor(slot)
 	if n.continued {
 		c.be = c.ha
+	}
+	if continuingTalk && (c.be != c.claw || config.Get().OpenClaw != selectedTalk) {
+		_ = c.claw.Stop()
+		return false
+	}
+	if c.nativeTalk() {
+		if continuingTalk {
+			c.clawConfig = selectedTalk
+		} else {
+			c.clawConfig = config.Get().OpenClaw
+		}
 	}
 	if !c.be.Ready() {
 		slog.Warn("no voice pipeline ready, ignoring wake", "slot", slot+1, "backend", c.be.Name())
@@ -1159,7 +1188,8 @@ func (c *conversation) start(n nextTurn) bool {
 		} else if claw, ok := be.(*clawBackend); ok {
 			c.clawSends = &clawSendScope{active: true}
 			gen := claw.generation()
-			c.sendClaw(c.clawSends, "start", func() error { return claw.startFrom(gen) })
+			selected := c.clawConfig
+			c.sendClaw(c.clawSends, "start", func() error { return claw.startInputFrom(gen, n.followUp, selected) })
 		} else {
 			c.send("start", func() error { return be.Start(asked) })
 		}
@@ -1318,6 +1348,11 @@ func (c *conversation) speak(url string) {
 // idle closes whatever is open. The ending is passed rather than read back out of why, so a new way
 // for a turn to end cannot quietly report itself as one of the old ones.
 func (c *conversation) idle(why string, how activity.Ending) {
+	c.finish(why, how, false)
+}
+
+func (c *conversation) finish(why string, how activity.Ending, keepTalk bool) bool {
+	keptTalk := false
 	was := c.phase
 	c.stopStreaming()
 	c.disarm()
@@ -1326,14 +1361,20 @@ func (c *conversation) idle(why string, how activity.Ending) {
 	c.nativeAudible = false
 	c.nativeFinished = false
 
+	if claw, ok := c.be.(*clawBackend); ok {
+		c.clawSends.retire()
+		keptTalk = keepTalk && claw.keepForFollowUp()
+		if !keptTalk {
+			_ = claw.Stop()
+		}
+	}
 	if was != phaseIdle {
 		if rt, ok := c.be.(*rtBackend); ok {
 			// Stopped here and now, never dropped with a full queue: a session left open goes on, and is
 			// billed, until its limit.
 			_ = rt.Stop()
-		} else if claw, ok := c.be.(*clawBackend); ok {
-			c.clawSends.retire()
-			_ = claw.Stop()
+		} else if _, ok := c.be.(*clawBackend); ok {
+			// Native logical ownership was settled above, including idle exits.
 		} else {
 			c.send("stop", c.be.Stop)
 		}
@@ -1355,6 +1396,7 @@ func (c *conversation) idle(why string, how activity.Ending) {
 	if was != phaseIdle {
 		slog.Info("turn ended", "was", was, "slot", c.slot+1, "why", why)
 	}
+	return keptTalk
 }
 
 // askEffect has the loop show name for the step the turn is in (Voice.ShowEffect). Only the latest

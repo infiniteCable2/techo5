@@ -625,6 +625,7 @@ func TestNetworkChangeReplacesBothRolesWithoutReplayingInput(t *testing.T) {
 			if ready {
 				waitReady(t, c, true)
 			}
+			generation := c.ConnectionGeneration()
 			c.NetworkChanged()
 			roles := map[string]bool{}
 			for range 2 {
@@ -639,6 +640,9 @@ func TestNetworkChangeReplacesBothRolesWithoutReplayingInput(t *testing.T) {
 				t.Fatal("both roles were not replaced")
 			}
 			waitReady(t, c, true)
+			if c.ConnectionGeneration() <= generation {
+				t.Fatal("replacement transport pair retained its Talk connection generation")
+			}
 		})
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"github.com/ygelfand/go-esphome-device/api"
 
 	"github.com/HuskerMinion/techo5/echod/internal/config"
+	"github.com/HuskerMinion/techo5/echod/internal/feature/activity"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/phone"
 	"github.com/HuskerMinion/techo5/echod/internal/feature/ring"
 	"github.com/HuskerMinion/techo5/echod/internal/hardware/led"
@@ -381,6 +382,10 @@ func (c *conversation) confirm(slot int, peak float64) {
 // second, so a mute, a call or a change of setting reaches the stream without needing an event of its
 // own.
 func (c *conversation) consider() {
+	if c.nativeTalk() && c.phase != phaseIdle && (c.micBusy() || config.Get().OpenClaw != c.clawConfig) {
+		c.clearPending()
+		c.idle("microphone or voice source changed", activity.Canceled)
+	}
 	defer func() {
 		w := c.watch
 		c.hears.Store(w != nil && w.mode == watchStream && !w.closing && c.proven)

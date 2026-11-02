@@ -30,7 +30,7 @@ agent opt-in described below additionally requires `operator.write`; it never
 requests admin. Tool authority remains subject to native Talk policy and the
 independently approved scope set.
 
-Each local turn creates the following native media session:
+Each logical voice conversation creates the following native media session:
 
 ```json
 {"mode":"stt-tts","transport":"gateway-relay","brain":"agent-consult","sessionKey":"agent:example:voice:echo-example"}
@@ -45,6 +45,16 @@ retain real capture during cold setup and pace native TTS bursts into the
 existing player. Overflow fails visibly. Clear/cancel and replacement turns
 fence queued input, output and playback callbacks. Mutations are not blindly
 replayed after a disconnect or a canceled call.
+
+Configured connected follow-ups reuse that same live native Talk session after
+the preceding reply has drained locally. Each capture submits its own ordered
+`endOfInput` boundary; retired microphone/sender work and reply completions cannot
+end the next capture. This preserves native conversation-scoped spoken questions,
+including their normal confirmation policy, without a device consent cache or
+additional scopes. Silence/timeout, cancellation, mute, a voice-source change,
+disconnect, failed follow-up admission, or a deliberate new conversation closes
+the logical Talk session. Persistent history under the session key alone is not
+a substitute for that live logical session.
 
 ## Required matching Core and provider
 
