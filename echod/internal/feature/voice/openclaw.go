@@ -533,18 +533,20 @@ func (b *clawBackend) events(ctx context.Context) {
 					client.NetworkChanged()
 				}
 			}
-			b.mu.Lock()
-			t := b.turn
-			disconnected := t != nil && !b.sameConnection(t)
-			b.mu.Unlock()
-			if disconnected {
-				if t != nil {
-					b.emit(t, event{kind: evError, code: "openclaw-disconnected"})
-				}
-			}
+			b.checkConnection()
 		case e := <-b.client.Events():
 			b.receive(e.Payload)
 		}
+	}
+}
+
+func (b *clawBackend) checkConnection() {
+	b.mu.Lock()
+	t := b.turn
+	disconnected := t != nil && !b.sameConnection(t)
+	b.mu.Unlock()
+	if disconnected {
+		b.emit(t, event{kind: evError, code: "openclaw-disconnected"})
 	}
 }
 

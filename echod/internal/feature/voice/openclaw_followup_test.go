@@ -236,10 +236,9 @@ func TestTalkConnectedFollowupEndsOnPrivacyErrorOrSilence(t *testing.T) {
 				if err := c.claw.Audio([]byte{2, 0}); err == nil {
 					t.Fatal("old logical Talk accepted input after reconnect")
 				}
-				ctx, cancel := context.WithCancel(c.claw.ctx)
-				done := make(chan struct{})
-				go func() { defer close(done); c.claw.events(ctx) }()
-				defer func() { cancel(); <-done }()
+				// Run the production poll's check at this controlled boundary;
+				// its one-second ticker is not part of the revocation contract.
+				c.claw.checkConnection()
 				for c.phase != phaseIdle {
 					handleNext(t, c)
 				}
