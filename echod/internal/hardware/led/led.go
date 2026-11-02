@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"encoding/hex"
 	"fmt"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -77,8 +78,10 @@ type Ring struct {
 	//
 	// Nil until the first write. Start takes the ring off the kernel driver mid boot animation, so
 	// what is on it before that is not ours to assume.
-	mu   sync.Mutex
-	last []byte
+	mu        sync.Mutex
+	last      []byte
+	requested []byte   // unscaled frame, also repainted when a solid ring dims
+	roomScale *float64 // nil preserves legacy full brightness
 
 	// absent is a device with no ring at all, such as the Echo Show 5. Frames are remembered and
 	// nothing is written, so everything that draws keeps working and the hardware is simply not there.
@@ -114,6 +117,35 @@ func (r *Ring) SetFrame(vals []byte) error {
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.requested = append(r.requested[:0], vals...)
+	return r.writeFrame(vals)
+}
+
+// SetRoomScale dims all ring layers without changing color/effect or lighting
+// an otherwise dark ring. The hardware microphone privacy LED stays separate.
+func (r *Ring) SetRoomScale(factor float64) error {
+	if math.IsNaN(factor) || math.IsInf(factor, 0) || factor < 0 || factor > 1 {
+		return fmt.Errorf("led: invalid room scale")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.roomScale = &factor
+	if len(r.requested) != Channels {
+		return nil
+	}
+	return r.writeFrame(r.requested)
+}
+
+// Called under the ring lock; the cache holds the physical, scaled frame.
+func (r *Ring) writeFrame(vals []byte) error {
+	if r.roomScale != nil && *r.roomScale != 1 {
+		factor := *r.roomScale
+		dimmed := make([]byte, len(vals))
+		for i, v := range vals {
+			dimmed[i] = byte(math.Round(float64(v) * factor))
+		}
+		vals = dimmed
+	}
 
 	if bytes.Equal(vals, r.last) {
 		return nil

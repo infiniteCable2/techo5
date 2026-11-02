@@ -59,6 +59,9 @@ func (h ha) Name() string             { return "home assistant" }
 // backendFor is which one a new turn runs against: the direct pipeline when it is chosen and set up,
 // Home Assistant otherwise.
 func (c *conversation) backendFor(slot int) backend {
+	if config.Get().OpenClaw.Enabled() {
+		return c.claw
+	}
 	// A slot chosen for realtime voice is answered by it, whatever the brain: not ready (not set up, or
 	// the day's minutes used), the turn says so rather than going to another assistant unasked.
 	if w := config.Get().Wake.Words; slot >= 0 && slot < len(w) && w[slot].Realtime {
@@ -80,7 +83,7 @@ func (c *conversation) onHA() bool {
 // it: the device's own, not Home Assistant's run.
 func (c *conversation) stopsAtOnce() bool {
 	switch c.be.(type) {
-	case *direct, *rtBackend:
+	case *direct, *rtBackend, *clawBackend:
 		return true
 	}
 	return false

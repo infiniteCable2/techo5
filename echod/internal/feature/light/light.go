@@ -26,9 +26,10 @@ func init() {
 }
 
 type Light struct {
-	light *esphome.Light
-	segs  []*esphome.Light
-	base  *led.Claim
+	light          *esphome.Light
+	segs           []*esphome.Light
+	base           *led.Claim
+	autoBrightness *esphome.Switch
 
 	mu    sync.Mutex
 	frame []led.Color
@@ -63,6 +64,14 @@ func build() *Light {
 		frame: make([]led.Color, led.Segments),
 	}
 	l.light.OnCommand = func(s esphome.LightState) { l.set(s, true) }
+	l.autoBrightness = &esphome.Switch{Base: esphome.Base{ObjectID: "ring_auto_brightness", Name: "Automatic ring brightness", DeviceID: component.DeviceRing}}
+	l.autoBrightness.OnCommand = func(on bool) {
+		if err := config.Set().Ring().AutoBrightness(on); err != nil {
+			slog.Error("saving ring auto brightness failed", "err", err)
+			return
+		}
+		l.autoBrightness.Set(on)
+	}
 
 	// Start from white at full brightness so the first command has something to turn on. Nothing is
 	// shown yet: the claim stays empty until Home Assistant or a restore says otherwise, so the boot
@@ -95,7 +104,7 @@ func (l *Light) Entities() []esphome.Entity {
 	if !led.HasRing {
 		return nil
 	}
-	out := []esphome.Entity{l.light}
+	out := []esphome.Entity{l.light, l.autoBrightness}
 	for _, s := range l.segs {
 		out = append(out, s)
 	}
@@ -112,6 +121,7 @@ func (l *Light) Base() led.Color { return colorOf(l.light.Get()) }
 // Restore puts back the appearance Home Assistant last set. Off unless it was on: a ring that lights
 // the room by itself after a power cut is a surprise, which is why ESPHome makes that opt-in too.
 func (l *Light) Restore(c config.Config) {
+	l.autoBrightness.Set(c.Ring.AutoBrightness)
 	saved := c.Ring.Light
 
 	if !saved.On || !led.HasRing {

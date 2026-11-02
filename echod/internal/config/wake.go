@@ -196,6 +196,12 @@ type WakeWord struct {
 	MaxListen int `json:"max_listen"`
 	MaxThink  int `json:"max_think"`
 
+	// NoSpeech is the native Talk opening window without input activity. It is
+	// separate from the maximum length of a request that has already begun.
+	NoSpeech int `json:"no_speech,omitempty"`
+	// EndSilenceMS is the native Talk relative endpoint pause; zero preserves 600 ms.
+	EndSilenceMS int `json:"end_silence_ms,omitempty"`
+
 	// Recordings is how many of this slot's turns to keep the audio of on disk. Zero keeps none.
 	Recordings int `json:"recordings"`
 
@@ -211,6 +217,7 @@ const (
 
 	DefaultMaxListen = 15
 	DefaultMaxThink  = 90
+	DefaultNoSpeech  = 10
 
 	// Zero is no follow-up unless Home Assistant asks for one.
 	DefaultFollowUp = 0
@@ -231,6 +238,7 @@ func DefaultWakeWord() WakeWord {
 		Buffer:    DefaultBuffer,
 		MaxListen: DefaultMaxListen,
 		MaxThink:  DefaultMaxThink,
+		NoSpeech:  DefaultNoSpeech,
 	}
 }
 
@@ -382,6 +390,14 @@ func (w WakeWriter) MaxListen(seconds int) error {
 
 func (w WakeWriter) MaxThink(seconds int) error {
 	return w.word(func(word *WakeWord) { word.MaxThink = seconds })
+}
+
+func (w WakeWriter) EndSilenceMS(milliseconds int) error {
+	return w.word(func(s *WakeWord) { s.EndSilenceMS = max(200, min(milliseconds, 3000)) })
+}
+
+func (w WakeWriter) NoSpeech(seconds int) error {
+	return w.word(func(word *WakeWord) { word.NoSpeech = min(max(seconds, 1), 60) })
 }
 
 func (w WakeWriter) Recordings(count int) error {

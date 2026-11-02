@@ -2,8 +2,10 @@ package voice
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"math"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -75,43 +77,57 @@ func (p phase) String() string {
 type eventKind int
 
 const (
-	evStart       eventKind = iota // a wake word fired, or something asked for a turn
-	evHeard                        // Home Assistant has heard enough
-	evReplyText                    // a reply is coming
-	evReplyURL                     // the reply can be fetched whole
-	evStreamStart                  // reply audio is about to arrive over the API
-	evStreamAudio                  // a chunk of it
-	evStreamEnd                    // all of it has been sent
-	evPlayed                       // the reply has finished playing
-	evRunEnd                       // Home Assistant closed the run
-	evError                        // the pipeline failed
-	evCancel                       // the user gave up on it
-	evTimeout                      // Home Assistant never closed the run
-	evPending                      // a turn held back for the last one to close has waited long enough
-	evPlaying                      // the reply (event.reply) has audio, so the pipeline owes nothing more
-	evContinue                     // Home Assistant wants the answer to a question it just asked
-	evSpeaking                     // VAD detected speech has started
-	evSpokeEnd                     // the device heard the speaker finish; text is the turn's id
-	evLookHere                     // the answer put something on the screen: no listening again after it
-	evCutOff                       // another sound took the speaker from the reply (event.reply)
-	evEffect                       // an effect asked for the step the turn is in (c.effect, askEffect)
-	evWakeStart                    // Home Assistant's wake word engine is listening (hawake.go)
-	evWakeEnd                      // and has heard the word
-	evUnconfirmed                  // a wake asked about was not heard in time
-	evCandidate                    // a wake the device was not sure of (event.slot, event.peak)
-	evWatch                        // something a stream to Home Assistant depends on may have changed
-	evRunStart                     // Home Assistant opened a run
+	evStart               eventKind = iota // a wake word fired, or something asked for a turn
+	evHeard                                // Home Assistant has heard enough
+	evReplyText                            // a reply is coming
+	evClawCaption                          // visible native text; never an audio/turn transition
+	evReplyURL                             // the reply can be fetched whole
+	evStreamStart                          // reply audio is about to arrive over the API
+	evStreamAudio                          // a chunk of it
+	evStreamEnd                            // all of it has been sent
+	evPlayed                               // the reply has finished playing
+	evRunEnd                               // Home Assistant closed the run
+	evError                                // the pipeline failed
+	evCancel                               // the user gave up on it
+	evTimeout                              // Home Assistant never closed the run
+	evPending                              // a turn held back for the last one to close has waited long enough
+	evPlaying                              // the reply (event.reply) has audio, so the pipeline owes nothing more
+	evContinue                             // Home Assistant wants the answer to a question it just asked
+	evSpeaking                             // VAD detected speech has started
+	evSpokeEnd                             // the device heard the speaker finish; text is the turn's id
+	evLookHere                             // the answer put something on the screen: no listening again after it
+	evCutOff                               // another sound took the speaker from the reply (event.reply)
+	evEffect                               // an effect asked for the step the turn is in (c.effect, askEffect)
+	evWakeStart                            // Home Assistant's wake word engine is listening (hawake.go)
+	evWakeEnd                              // and has heard the word
+	evUnconfirmed                          // a wake asked about was not heard in time
+	evCandidate                            // a wake the device was not sure of (event.slot, event.peak)
+	evWatch                                // something a stream to Home Assistant depends on may have changed
+	evRunStart                             // Home Assistant opened a run
+	evClawClear                            // native Talk revoked queued output
+	evClawSpeaking                         // native Talk distinguishes speech from waiting music
+	evNoSpeechTimeout                      // no request activity in the opening window
+	evClawSilent                           // native speech span ended; more output may follow
+	evClawAudible                          // local speaker timeline, not transport receipt
+	evClawInputSpeech                      // a nonempty native partial transcript confirms input
+	evClawCaptionPosition                  // locally audible output, optional presentation only
 )
 
 type event struct {
-	kind  eventKind
-	slot  int
-	text  string
-	url   string
-	audio []byte
-	code  string
-	msg   string
-	at    time.Time
+	captionMark    captionMark
+	canonical      bool
+	clawGeneration int            // fences events from a replaced native Talk session
+	clawPlayback   int            // playback epoch within that native session
+	clawSend       *clawSendScope // queued transport failure belongs to this local turn
+	kind           eventKind
+	slot           int
+	text           string
+	url            string
+	audio          []byte
+	code           string
+	msg            string
+	audible        bool
+	at             time.Time
 
 	// reply is which reply an evPlaying or evCutOff is about (reply.id). One from a reply that was
 	// stopped, or from anything that is not a reply, must not take the turn's deadline away or end
@@ -147,6 +163,7 @@ type conversation struct {
 	direct *direct
 	// realtime answers a slot chosen for realtime voice (realtime.go).
 	realtime *rtBackend
+	claw     *clawBackend
 	be       backend
 
 	source  *mic.Source
@@ -197,9 +214,15 @@ type conversation struct {
 	// follows the word that actually just fired.
 	slot int
 
-	claim     *led.Claim
-	stopAudio func()
-	deadline  *time.Timer
+	claim          *led.Claim
+	stopAudio      func()
+	clawSends      *clawSendScope
+	deadline       *time.Timer
+	noSpeech       *time.Timer
+	noSpeechUntil  time.Time
+	nativeSpeaking bool
+	nativeAudible  bool
+	nativeFinished bool
 
 	// holding is whether the turn has taken the speaker from a track, so that taking it twice or
 	// giving it back twice cannot happen however the turn ends.
@@ -324,9 +347,84 @@ type nextTurn struct {
 type reply struct {
 	url    string
 	stream *stream
+	claim  *speaker.Claim
 
 	// id tells this reply's evPlaying from a stopped one's. Zero is no reply.
 	id uint64
+}
+
+// The sender and microphone goroutines may outlive a cancelled local turn.
+// Serialize retirement with its short enqueue operations, before another turn
+// can replace the mutable backend's input queue.
+type clawSendScope struct {
+	mu     sync.Mutex
+	active bool
+	done   chan struct{}
+}
+
+func (s *clawSendScope) retiredSignal() <-chan struct{} {
+	if s == nil {
+		done := make(chan struct{})
+		close(done)
+		return done
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.done == nil {
+		s.done = make(chan struct{})
+		if !s.active {
+			close(s.done)
+		}
+	}
+	return s.done
+}
+
+func (s *clawSendScope) current() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.active
+}
+func (s *clawSendScope) retire() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	if s.active && s.done != nil {
+		close(s.done)
+	}
+	s.active = false
+	s.mu.Unlock()
+}
+
+type clawSendError struct {
+	scope *clawSendScope
+	err   error
+}
+
+func (e *clawSendError) Error() string { return e.err.Error() }
+func (c *conversation) sendClaw(scope *clawSendScope, what string, fn func() error) {
+	queued := func() error {
+		if scope == nil {
+			return nil
+		}
+		scope.mu.Lock()
+		defer scope.mu.Unlock()
+		if !scope.active {
+			return nil
+		}
+		if err := fn(); err != nil {
+			return &clawSendError{scope: scope, err: err}
+		}
+		return nil
+	}
+	select {
+	case c.out <- queued:
+	default:
+		c.post(event{kind: evError, code: "openclaw-input-overflow", msg: what, clawSend: scope})
+	}
 }
 
 func newConversation(vs *esphome.VoiceSatellite) *conversation {
@@ -346,6 +444,7 @@ func newConversation(vs *esphome.VoiceSatellite) *conversation {
 	c.ha = ha{vs: vs, watch: c.startWatch}
 	c.direct = newDirect(c.post)
 	c.realtime = newRealtime(c.postSure)
+	c.claw = newClaw(c.postSure)
 	c.be = c.ha
 
 	vs.OnPipelineEvent = c.pipeline
@@ -380,8 +479,14 @@ func (c *conversation) send(what string, fn func() error) {
 
 // sendAudio queues a frame or drops it. Audio held back until a stalled link recovers is audio
 // nobody wants by then, and the frame is copied because the caller reuses it.
-func (c *conversation) sendAudio(be backend, b []byte) {
+func (c *conversation) sendAudio(be backend, b []byte, scope ...*clawSendScope) {
 	frame := append([]byte(nil), b...)
+	if _, ok := be.(*clawBackend); ok {
+		if len(scope) == 1 {
+			c.sendClaw(scope[0], "audio", func() error { return be.Audio(frame) })
+		}
+		return
+	}
 	select {
 	case c.out <- func() error { return be.Audio(frame) }:
 	default:
@@ -397,6 +502,13 @@ func (c *conversation) sends(ctx context.Context) {
 			return
 		case fn := <-c.out:
 			if err := fn(); err != nil {
+				var native *clawSendError
+				if errors.As(err, &native) {
+					// Never drain the shared queue: it can already contain the next
+					// wake's Start. The loop fences this error against its own turn.
+					c.post(event{kind: evError, code: "send", msg: native.Error(), clawSend: native.scope})
+					continue
+				}
 				slog.Error("sending to home assistant failed", "err", err)
 				for len(c.out) > 0 {
 					<-c.out
@@ -445,12 +557,15 @@ func (c *conversation) Run(ctx context.Context) {
 	defer tick.Stop()
 
 	for {
-		var expired, waited <-chan time.Time
+		var expired, waited, silent <-chan time.Time
 		if c.deadline != nil {
 			expired = c.deadline.C
 		}
 		if c.grace != nil {
 			waited = c.grace.C
+		}
+		if c.noSpeech != nil {
+			silent = c.noSpeech.C
 		}
 
 		select {
@@ -459,6 +574,8 @@ func (c *conversation) Run(ctx context.Context) {
 			return
 		case <-expired:
 			c.handle(event{kind: evTimeout})
+		case <-silent:
+			c.handle(event{kind: evNoSpeechTimeout})
 		case <-waited:
 			c.handle(event{kind: evPending})
 		case <-c.watchTimeout():
@@ -475,6 +592,15 @@ func (c *conversation) Run(ctx context.Context) {
 // here, which is what makes the whole thing idempotent. A run at Home Assistant's wake word stage
 // takes its own events first, and whether one should be open is considered after every event.
 func (c *conversation) handle(e event) {
+	if e.clawSend != nil && !e.clawSend.current() {
+		return
+	}
+	if e.clawGeneration != 0 && !c.claw.current(e.clawGeneration) {
+		return
+	}
+	if e.clawPlayback != 0 && !c.claw.currentPlayback(e.clawGeneration, e.clawPlayback) {
+		return
+	}
 	if !c.watchEvent(e) {
 		c.turnEvent(e)
 	}
@@ -483,11 +609,74 @@ func (c *conversation) handle(e event) {
 
 func (c *conversation) turnEvent(e event) {
 	switch e.kind {
+	case evClawClear:
+		c.nativeSpeaking = false
+		c.nativeAudible = false
+		c.nativeFinished = false
+		if c.phase == phaseReplying {
+			c.sound.CancelClaim(c.reply.claim)
+			if c.reply.stream != nil {
+				c.reply.stream.done()
+			}
+			c.reply = reply{}
+			c.player.Sounding(false)
+			c.enter(phaseThinking)
+			c.arm(wakeword.MaxThink(c.slot))
+			c.showThinking()
+		}
+	case evClawSpeaking:
+		if c.nativeTalk() && c.phase != phaseIdle {
+			c.disarmNoSpeech()
+			c.nativeSpeaking = true
+		}
+	case evClawSilent:
+		c.nativeSpeaking = false
+	case evClawAudible:
+		if !c.nativeTalk() || c.phase != phaseReplying || e.reply == 0 || e.reply != c.reply.id {
+			return
+		}
+		c.nativeAudible = e.audible
+		if !e.audible && c.nativeFinished {
+			// Final audio is drained; keep its last appearance until evPlayed
+			// opens real follow-up capture, with no false processing flash.
+			return
+		}
+		if e.audible {
+			c.disarm()
+		} else {
+			c.arm(wakeword.MaxThink(c.slot))
+		}
+		c.showReplying()
+	case evClawCaptionPosition:
+		if !c.nativeTalk() || c.phase != phaseReplying || e.reply == 0 || e.reply != c.reply.id {
+			return
+		}
+		if position, ok := c.claw.captionPosition(e.captionMark); ok && (!c.shown.ReplyCursorKnown || position > c.shown.ReplyCursor) {
+			c.shown.ReplyCursor = position
+			c.shown.ReplyCursorKnown = true
+			Changed.Emit(c.shown)
+		}
+	case evNoSpeechTimeout:
+		if c.nativeTalk() && c.phase != phaseIdle && c.noSpeech != nil && !c.now().Before(c.noSpeechUntil) {
+			c.turnEvent(event{kind: evError, code: errNoText})
+			feedback.Canceled()
+		}
+	case evClawInputSpeech:
+		if c.nativeTalk() && c.phase == phaseListening && c.turn != nil && c.noSpeech != nil {
+			c.turnEvent(event{kind: evSpeaking, text: c.turn.ID()})
+		}
 	case evStart:
 		c.start(nextTurn{slot: e.slot, woke: e.woke, asked: e.asked, at: e.at, waited: e.waited})
 
 	case evSpeaking:
-		if c.followUp && c.phase == phaseListening {
+		if c.nativeTalk() && (c.phase != phaseListening || c.turn == nil || e.text != c.turn.ID()) {
+			return
+		}
+		if c.nativeTalk() && c.noSpeech == nil {
+			return
+		}
+		c.disarmNoSpeech()
+		if (c.nativeTalk() || c.followUp) && c.phase == phaseListening {
 			c.arm(wakeword.MaxListen(c.slot))
 		}
 
@@ -497,6 +686,9 @@ func (c *conversation) turnEvent(e event) {
 		// does, and it goes on to transcribe and answer what it has. The id keeps a late one from an
 		// earlier turn from ending this one.
 		if c.phase == phaseListening && e.text == c.turn.ID() {
+			if c.nativeTalk() && c.noSpeech != nil {
+				return
+			}
 			slog.Info("end of speech heard here, ending the turn", "slot", c.slot+1)
 			c.think()
 		}
@@ -523,6 +715,9 @@ func (c *conversation) turnEvent(e event) {
 		}
 
 	case evHeard:
+		if c.nativeTalk() && strings.TrimSpace(e.text) != "" {
+			c.disarmNoSpeech()
+		}
 		if pageAsked(e.text) {
 			c.lookHere = true
 		}
@@ -579,6 +774,12 @@ func (c *conversation) turnEvent(e event) {
 			c.think()
 		}
 
+	case evClawCaption:
+		if c.phase != phaseIdle && c.be == c.claw {
+			c.shown.Reply = e.text
+			Changed.Emit(c.shown)
+		}
+
 	case evReplyText:
 		// The reply to a turn that has ended, one taken as a mistake say: its run is being stopped, and
 		// marking the player as sounding now would hold the music down with nothing to give it back.
@@ -588,7 +789,9 @@ func (c *conversation) turnEvent(e event) {
 		slog.Info("replying", "slot", c.slot+1, "text", e.text)
 		c.log.Replied(e.text)
 		c.turn.Replying(e.text)
-		c.shown.Reply = e.text
+		if c.be != c.claw || (c.shown.Reply == "" && !e.canonical) {
+			c.shown.Reply = e.text
+		}
 		Changed.Emit(c.shown)
 		if c.phase == phaseListening {
 			c.think()
@@ -620,6 +823,11 @@ func (c *conversation) turnEvent(e event) {
 		c.speak(e.url)
 
 	case evStreamAudio:
+		// Native waiting music is transport audio, not the agent answering.
+		// It must never acquire reply ownership and stop an open microphone.
+		if c.nativeTalk() && c.phase == phaseListening && !c.nativeSpeaking {
+			return
+		}
 		// Retired as soon as a url arrives.
 		if c.phase == phaseIdle || c.reply.url != "" {
 			return
@@ -627,9 +835,29 @@ func (c *conversation) turnEvent(e event) {
 		if c.phase != phaseReplying {
 			c.speak("")
 		}
-		c.reply.stream.send(e.audio)
+		if _, native := c.be.(*clawBackend); native {
+			if !c.reply.stream.trySendNativeMarked(e.audio, c.nativeSpeaking, e.captionMark) {
+				c.turnEvent(event{kind: evError, code: "openclaw-playback-overflow"})
+			} else if !c.nativeAudible {
+				// Receiving PCM, including waiting audio, proves the stream is
+				// progressing even when the ring correctly shows processing.
+				if c.deadline == nil {
+					c.arm(wakeword.MaxThink(c.slot))
+				} else {
+					c.deadline.Reset(wakeword.MaxThink(c.slot))
+				}
+			}
+		} else {
+			c.reply.stream.send(e.audio)
+		}
 
 	case evStreamEnd:
+		if c.nativeTalk() {
+			c.nativeFinished = true
+			// The sender has finished, but buffered audio still owns the turn.
+			// evPlayed opens follow-up only after the local player has drained.
+			c.disarm()
+		}
 		// Everything Home Assistant is going to send has been sent. What the errand is still holding
 		// back for the cushion plays, and it finishes once that has been heard.
 		if c.phase == phaseReplying && c.reply.stream != nil {
@@ -637,6 +865,9 @@ func (c *conversation) turnEvent(e event) {
 		}
 
 	case evPlayed:
+		if e.reply != 0 && e.reply != c.reply.id {
+			return
+		}
 		c.reported(e.at)
 		if c.phase == phaseReplying {
 			slot := c.slot
@@ -648,7 +879,7 @@ func (c *conversation) turnEvent(e event) {
 			// Continual conversation: the slot keeps listening after every reply, not only the ones
 			// Home Assistant asked to continue - as many times in a row as the slot allows.
 			limit := wakeword.FollowUps(slot)
-			if !rt && c.pending == nil && !c.lookHere && wakeword.FollowUp(slot) > 0 && (limit == 0 || c.followUps < limit) {
+			if !rt && c.pending == nil && (!c.lookHere || c.nativeTalk()) && wakeword.FollowUp(slot) > 0 && (limit == 0 || c.followUps < limit) {
 				slog.Info("listening again after the reply", "slot", slot+1, "for", wakeword.FollowUp(slot))
 				c.pending = &nextTurn{slot: slot, followUp: true}
 			}
@@ -677,7 +908,9 @@ func (c *conversation) turnEvent(e event) {
 		if e.reply == 0 || e.reply != c.reply.id {
 			return
 		}
-		c.disarm()
+		if !c.nativeTalk() {
+			c.disarm()
+		}
 
 	case evCutOff:
 		// An announcement, or an alarm, took the speaker from the reply. Nothing else would end the
@@ -741,7 +974,18 @@ func (c *conversation) turnEvent(e event) {
 		feedback.Canceled()
 
 	case evTimeout:
+		if c.nativeTalk() && (c.phase == phaseThinking || c.phase == phaseReplying) {
+			if remaining := c.claw.outputRemaining(c.now(), wakeword.MaxThink(c.slot)); remaining > 0 {
+				c.arm(remaining)
+				return
+			}
+		}
 		c.clearPending()
+		if c.nativeTalk() && c.phase == phaseListening && c.noSpeech == nil {
+			slog.Info("native capture limit reached; submitting recorded request", "seconds", wakeword.MaxListen(c.slot).Seconds())
+			c.think()
+			return
+		}
 
 		// Nobody spoke into a turn nobody asked for, which is how a follow-up is meant to end. Every
 		// other timeout is something failing: listening means Home Assistant stopped answering,
@@ -912,6 +1156,10 @@ func (c *conversation) start(n nextTurn) bool {
 			// Stopped at once, not through the queue: a start still queued when the turn ends is refused.
 			gen := rt.generation()
 			c.send("start", func() error { return rt.startFrom(gen) })
+		} else if claw, ok := be.(*clawBackend); ok {
+			c.clawSends = &clawSendScope{active: true}
+			gen := claw.generation()
+			c.sendClaw(c.clawSends, "start", func() error { return claw.startFrom(gen) })
 		} else {
 			c.send("start", func() error { return be.Start(asked) })
 		}
@@ -924,12 +1172,20 @@ func (c *conversation) start(n nextTurn) bool {
 	c.enter(phaseListening)
 	c.turn.Listening()
 	c.reply = reply{}
+	c.nativeSpeaking = false
+	c.nativeAudible = false
+	c.nativeFinished = false
 
-	if effect := wakeword.Effect(slot); effect != "" {
-		c.claim.Play(effect, c.ring.Base())
+	c.showListening()
+
+	if c.nativeTalk() {
+		// Opening silence has its own timer. Once speech begins, evSpeaking
+		// grants the configured maximum request length from that onset.
+		c.disarm()
+	} else {
+		c.arm(c.listenFor(n))
 	}
-
-	c.arm(c.listenFor(n))
+	c.armNoSpeech()
 	c.startAudio(slot, n.followUp, n.continued, n.waited)
 	// The phrase is logged for a follow-up too, because it is what chose the pipeline — not because
 	// anyone said it.
@@ -969,7 +1225,7 @@ func (c *conversation) listenFor(n nextTurn) time.Duration {
 // after a wake word and with End of speech on the device on.
 func deviceEnds(be backend, followUp bool) bool {
 	switch be.(type) {
-	case *direct, *rtBackend:
+	case *direct, *rtBackend, *clawBackend:
 		return true
 	}
 	return !followUp && !config.Get().Microphone.PipelineEnds
@@ -982,7 +1238,7 @@ func (c *conversation) think() {
 	c.enter(phaseThinking)
 	c.arm(wakeword.MaxThink(c.slot))
 
-	c.showPhase(wakeword.ThinkingEffect(c.slot))
+	c.showThinking()
 }
 
 // speak moves to playing the reply. url is empty when it is arriving over the API instead.
@@ -998,7 +1254,7 @@ func (c *conversation) speak(url string) {
 	c.reply = reply{url: url, id: id}
 	playing := func() { c.post(event{kind: evPlaying, reply: id}) }
 
-	c.showPhase(wakeword.ReplyingEffect(c.slot))
+	c.showReplying()
 	c.player.Sounding(true)
 
 	// The deadline is left as it was. Text arriving is not the pipeline delivering: it still owes the
@@ -1008,7 +1264,17 @@ func (c *conversation) speak(url string) {
 		return c.play(ctx, url, playing, phone.RepliesIntoCall())
 	}
 	if url == "" {
-		s := newStream(c.speaker.Splices(), c.speaker.Underruns(), wakeword.Buffer(c.slot))
+		rate := speaker.VoiceRate
+		if _, native := c.be.(*clawBackend); native {
+			rate = clawOutputRate
+		}
+		s := newStreamRate(c.speaker.Splices(), c.speaker.Underruns(), wakeword.Buffer(c.slot), rate)
+		if c.nativeTalk() {
+			s.audible = func(on bool) { c.post(event{kind: evClawAudible, reply: id, audible: on}) }
+			if c.claw.hasTimings() {
+				s.caption = func(mark captionMark) { c.post(event{kind: evClawCaptionPosition, reply: id, captionMark: mark}) }
+			}
+		}
 		c.reply.stream = s
 		errand = func(ctx context.Context, p *speaker.Player) error {
 			return s.play(ctx, p, playing)
@@ -1018,6 +1284,7 @@ func (c *conversation) speak(url string) {
 	// A call up meanwhile sends the reply, not the room, until it and its echo are over (phone's uplink).
 	replied := phone.Get().ReplyStarted()
 	held := c.sound.ClaimSpeech("reply", errand)
+	c.reply.claim = held
 	// The slot is read here, on the loop: by the time the reply is over, the loop may be on another
 	// turn, and the slot is not the reply goroutine's to read.
 	slot := c.slot
@@ -1043,7 +1310,7 @@ func (c *conversation) speak(url string) {
 				wakeword.Get().FallBackToStream(slot)
 			}
 		}
-		c.post(event{kind: evPlayed, at: held.Quiet()})
+		c.post(event{kind: evPlayed, reply: id, at: held.Quiet()})
 	})
 }
 
@@ -1054,12 +1321,19 @@ func (c *conversation) idle(why string, how activity.Ending) {
 	was := c.phase
 	c.stopStreaming()
 	c.disarm()
+	c.disarmNoSpeech()
+	c.nativeSpeaking = false
+	c.nativeAudible = false
+	c.nativeFinished = false
 
 	if was != phaseIdle {
 		if rt, ok := c.be.(*rtBackend); ok {
 			// Stopped here and now, never dropped with a full queue: a session left open goes on, and is
 			// billed, until its limit.
 			_ = rt.Stop()
+		} else if claw, ok := c.be.(*clawBackend); ok {
+			c.clawSends.retire()
+			_ = claw.Stop()
 		} else {
 			c.send("stop", c.be.Stop)
 		}
@@ -1116,15 +1390,11 @@ func (c *conversation) showEffect(name string) {
 func (c *conversation) restyle() {
 	switch c.phase {
 	case phaseListening:
-		if effect := wakeword.Effect(c.slot); effect != "" {
-			c.claim.Play(effect, c.ring.Base())
-		} else {
-			c.claim.Clear()
-		}
+		c.showListening()
 	case phaseThinking:
-		c.showPhase(wakeword.ThinkingEffect(c.slot))
+		c.showThinking()
 	case phaseReplying:
-		c.showPhase(wakeword.ReplyingEffect(c.slot))
+		c.showReplying()
 	}
 }
 
@@ -1151,6 +1421,8 @@ func (c *conversation) enter(p phase) {
 	c.phase = p
 	c.visible.Store(int32(p))
 	c.shown.Phase = p.String()
+	c.shown.PlaybackKnown = c.nativeTalk()
+	c.shown.Speaking = c.nativeTalk() && p == phaseReplying && c.nativeAudible
 	Changed.Emit(c.shown)
 }
 
@@ -1328,8 +1600,8 @@ func audioSettings() *api.VoiceAssistantAudioSettings {
 	}
 }
 
-// startAudio begins sending microphone frames. The streamer only reads, so it needs no coordination
-// beyond being told to stop. continued is a run that has had the audio up to now already.
+// startAudio begins sending microphone frames. Native capture also owns its
+// final real frame before End. continued has had the audio up to now already.
 func (c *conversation) startAudio(slot int, followUp, continued bool, waited time.Duration) {
 	ctx, cancel := context.WithCancel(context.Background())
 	c.stopAudio = cancel
@@ -1339,6 +1611,7 @@ func (c *conversation) startAudio(slot int, followUp, continued bool, waited tim
 	// be kept out of the microphone.
 	id := c.turn.ID()
 	be := c.be
+	scope := c.clawSends
 	// A call up meanwhile holds the far end back from the room for as long as this listens (phone's
 	// playFarEnd), so the caller does not speak into the turn.
 	listened := phone.Get().TurnListening()
@@ -1346,7 +1619,7 @@ func (c *conversation) startAudio(slot int, followUp, continued bool, waited tim
 	safe.Go("turn audio", func() {
 		defer streams.Done()
 		defer listened()
-		c.stream(ctx, be, slot, followUp, continued, id, waited)
+		c.stream(ctx, be, slot, followUp, continued, id, waited, scope)
 	})
 }
 
@@ -1361,15 +1634,31 @@ func (c *conversation) stopStreaming() {
 	c.stopAudio()
 	c.stopAudio = nil
 
-	c.send("end of audio", c.be.End)
+	// Native capture owns its final real frame and queues End after it. Sending
+	// End here can overtake a late capture frame or close on fractional audio.
+	if _, native := c.be.(*clawBackend); !native {
+		c.send("end of audio", c.be.End)
+	}
 }
 
 // stream sends microphone frames until it is told to stop.
-func (c *conversation) stream(ctx context.Context, be backend, slot int, followUp, continued bool, id string, waited time.Duration) {
+func (c *conversation) stream(ctx context.Context, be backend, slot int, followUp, continued bool, id string, waited time.Duration, scope *clawSendScope) {
 	frames, pre, unlisten := c.source.ListenHistory("turn", mic.History+waited)
 	defer unlisten()
 
 	buf := make([]byte, 0, mic.FrameSamples*2)
+	_, native := be.(*clawBackend)
+	framed := nativeInputFrames{emit: func(pcm []byte) { c.sendAudio(be, pcm, scope) }}
+	var input *nativeInput
+	if native {
+		var err error
+		input, err = newNativeInput(config.Get().Wake.Slot(slot).EndSilenceMS)
+		if err != nil {
+			c.post(event{kind: evError, code: "openclaw-vad", clawSend: scope})
+			return
+		}
+		slog.Info("native VAD ready", "model", "micro-vad-v2", "model_bytes", 34328, "end_silence_ms", input.silence.Milliseconds())
+	}
 
 	// Send what was already said before this turn began. The wake word can only be recognized after
 	// it has been spoken, and people run straight on into the request, so the opening words exist only
@@ -1394,15 +1683,23 @@ func (c *conversation) stream(ctx context.Context, be backend, slot int, followU
 	//
 	// The direct pipeline and realtime voice have nobody else to decide (deviceEnds).
 	acts := deviceEnds(be, followUp)
-	ep := endpoint.New(endpoint.Default)
+	settings := endpoint.Default
+	ep := endpoint.New(settings)
 	var sent int
 	var endpointAt float64
 	see := func(frame []int16) {
+		// Native input is ended by its neural classifier below. The relative
+		// peak detector remains only for the other backends.
+		if native {
+			return
+		}
 		sent += len(frame)
-		if endpointAt == 0 && ep.Feed(frame) {
+		ended := ep.Feed(frame)
+		if endpointAt == 0 && ended {
 			endpointAt = float64(sent) / float64(mic.Rate)
+			spokeSamples := ep.EndedAt()
 			slog.Info("end of speech heard here", "slot", slot+1, "acted", acts,
-				"spoke_s", math.Round(float64(ep.EndedAt())/float64(mic.Rate)*10)/10,
+				"spoke_s", math.Round(float64(spokeSamples)/float64(mic.Rate)*10)/10,
 				"at_s", math.Round(endpointAt*10)/10)
 			if acts {
 				c.post(event{kind: evSpokeEnd, text: id})
@@ -1424,7 +1721,11 @@ func (c *conversation) stream(ctx context.Context, be backend, slot int, followU
 		}
 		recording.Get().Frame(buf)
 
-		c.sendAudio(be, buf)
+		if native {
+			framed.feed(pre)
+		} else {
+			c.sendAudio(be, buf, scope)
+		}
 		slog.Debug("sent audio history", "ms", len(pre)*1000/mic.Rate)
 	}
 
@@ -1442,6 +1743,10 @@ func (c *conversation) stream(ctx context.Context, be backend, slot int, followU
 	var peak, samples int
 	var energy float64
 	defer func() {
+		if native {
+			a := &input.activity
+			slog.Info("native input activity summary", "detector", "level+micro-vad-v2", "sampled_ms", a.elapsed.Milliseconds(), "speech_ms", a.overGate.Milliseconds(), "level_ms", input.levelTotal.Milliseconds(), "confirmed", a.sent, "vad_peak", math.Round(input.peakProbability*1000)/1000, "vad_work_ms", input.work.Milliseconds())
+		}
 		if samples == 0 {
 			return
 		}
@@ -1457,6 +1762,19 @@ func (c *conversation) stream(ctx context.Context, be backend, slot int, followU
 			"gaindb", math.Round(c.source.Gain()*10)/10,
 			"clipped", c.source.Clipped())
 	}()
+	observeCapture := func(frame []int16) {
+		buf = buf[:0]
+		for _, s := range frame {
+			buf = append(buf, byte(s), byte(s>>8))
+			peak = max(peak, int(s), -int(s))
+			energy += float64(s) * float64(s)
+			samples++
+		}
+		recording.Get().Frame(buf)
+	}
+	if native {
+		defer c.finishNativeInput(&framed, frames, be, scope, observeCapture)
+	}
 
 	for {
 		select {
@@ -1476,16 +1794,33 @@ func (c *conversation) stream(ctx context.Context, be backend, slot int, followU
 				slog.Debug("held the tone back", "ms", held*1000/mic.Rate)
 			}
 
-			buf = buf[:0]
-			for _, s := range frame {
-				buf = append(buf, byte(s), byte(s>>8))
-				peak = max(peak, int(s), -int(s))
-				energy += float64(s) * float64(s)
-				samples++
+			observeCapture(frame)
+			if native {
+				framed.feed(frame)
+			} else {
+				c.sendAudio(be, buf, scope)
 			}
-			recording.Get().Frame(buf)
-
-			c.sendAudio(be, buf)
+			if native {
+				if input.level(c.source.SpeechActive(), time.Duration(len(frame))*time.Second/mic.Rate) {
+					slog.Info("native input level candidate", "after_s", float64(samples)/mic.Rate)
+				}
+				onset, ended, err := input.feed(frame)
+				if err != nil {
+					c.post(event{kind: evError, code: "openclaw-vad", clawSend: scope})
+					return
+				}
+				if onset {
+					slog.Info("native input activity confirmed", "detector", "micro-vad-v2", "after_s", float64(samples)/mic.Rate)
+					c.post(event{kind: evSpeaking, text: id, clawSend: scope})
+				}
+				if ended {
+					endpointAt = float64(samples) / mic.Rate
+					slog.Info("end of speech heard here", "detector", "micro-vad-v2", "acted", acts, "at_s", math.Round(endpointAt*100)/100, "quiet_ms", input.activity.gap.Milliseconds())
+					if acts {
+						c.post(event{kind: evSpokeEnd, text: id, clawSend: scope})
+					}
+				}
+			}
 			see(frame)
 		}
 	}
@@ -1499,11 +1834,16 @@ func (c *conversation) reported(dry time.Time) {
 		return
 	}
 
-	seconds := float64(s.bytes) / float64(2*mic.Rate)
+	seconds := float64(s.bytes) / float64(2*s.rate)
 	took := dry.Sub(s.playingAt).Seconds()
+	clipped := c.speaker.Clipped()
+	if s.output != nil {
+		clipped = s.output.Clipped()
+	}
 
 	slog.Info("reply played",
 		"via", wakeword.Delivery(c.slot),
+		"rate_hz", s.rate,
 		"bytes", s.bytes,
 		"seconds", math.Round(seconds*100)/100,
 		"took", math.Round(took*100)/100,
@@ -1511,7 +1851,7 @@ func (c *conversation) reported(dry time.Time) {
 		"peak", s.peak,
 		"seams", c.speaker.Splices()-s.splicesAt,
 		"underruns", c.speaker.Underruns()-s.underrunsAt,
-		"clipped", c.speaker.Clipped(),
+		"clipped", clipped,
 		"dropped", c.source.Dropped())
 }
 

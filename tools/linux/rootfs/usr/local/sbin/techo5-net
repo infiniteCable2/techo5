@@ -47,6 +47,7 @@ GWFAIL=$RUN/network-gateway-misses
 GRACE=$RUN/network-grace            # minutes after joining Wi-Fi still not counted as misses
 RETRY=$RUN/network-retry-wait       # minutes until the fixed address is tried again
 RESOLV=$ROOT/run/resolv.conf
+DHCP_NETWORK=$RUN/network-dhcp-ssid
 SCRIPT=${UDHCPC_SCRIPT:-/etc/techo5/udhcpc.sh}
 WPA="wpa_cli -p /run/wpa -i $IF"
 NAMES='^(search|domain)[[:blank:]]+[A-Za-z0-9._[:blank:]-]+$'
@@ -183,7 +184,7 @@ stopdhcp() {
 # background, and one holding fd 9 would hold the lock for as long as it lives, and every later run of
 # this, the keeper's minute among them, would wait for it for good.
 dhcp() {
-	pidof udhcpc >/dev/null || udhcpc -i $IF -b -R -t 10 -p $ROOT/run/udhcpc.pid -s "$SCRIPT" > $ROOT/tmp/udhcpc.log 2>&1 9>&-
+	pidof udhcpc >/dev/null || TECHO5_DHCP_SSID_HEX="$network" udhcpc -i $IF -b -R -t 10 -p $ROOT/run/udhcpc.pid -s "$SCRIPT" > $ROOT/tmp/udhcpc.log 2>&1 9>&-
 	echo dhcp > $APPLIED
 }
 
@@ -232,9 +233,18 @@ fixed() {
 # automatic is DHCP; restart asks again from the start, as after a change of network, where the lease
 # a running client holds may belong to the network left behind.
 automatic() {
-	if [ "$1" = restart ] || [ "$(cat $APPLIED 2>/dev/null)" = static ]; then
+	network=$(ssidhex)
+	previous=$(cat "$DHCP_NETWORK" 2>/dev/null)
+	if [ "$1" = restart ] || [ "$(cat $APPLIED 2>/dev/null)" = static ] ||
+		{ [ -n "$network" ] && [ "$network" != "$previous" ]; }; then
 		stopdhcp
 		ip -4 addr flush dev $IF 2>/dev/null
+		ip -4 neigh flush dev $IF 2>/dev/null
+		# Never reuse the preceding network's resolver during fresh discovery.
+		: > "$RESOLV.tmp" && mv -f "$RESOLV.tmp" "$RESOLV"
+	fi
+	if [ -n "$network" ]; then
+		printf '%s\n' "$network" > "$DHCP_NETWORK.tmp" && mv -f "$DHCP_NETWORK.tmp" "$DHCP_NETWORK"
 	fi
 	dhcp
 }
@@ -374,6 +384,9 @@ check)
 		if [ "$(cat $APPLIED 2>/dev/null)" = static ]; then
 			log "a fixed address is on with DHCP set: DHCP"
 			automatic restart
+		elif joined; then
+			# Also covers automatic roaming if a supplicant event was missed.
+			automatic
 		fi
 		exit 0
 	fi

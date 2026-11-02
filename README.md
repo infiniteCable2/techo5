@@ -503,6 +503,12 @@ other. It has been tried on one unit, and the way back in Loader mode hasn't bee
 the backup. Every step: **[docs/install-skylight.md](docs/install-skylight.md)**. The hardware:
 [tools/linux/skylight](tools/linux/skylight/README.md).
 
+## OpenClaw candidate
+
+This fork includes an optional [native OpenClaw Talk backend](docs/openclaw.md).
+It preserves the device's audio/wake path and requires a matching Gateway and
+provider candidate. Hardware qualification is still pending.
+
 ## Under the hood
 
 | Layer | What |

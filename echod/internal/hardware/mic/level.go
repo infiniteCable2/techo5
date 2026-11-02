@@ -120,10 +120,12 @@ type leveler struct {
 	// the room is, for anything that wants to show it. bandPublished is bandFloor, copied out for the
 	// same reason: the reader updates it every frame and diagnostics ask for it from its own
 	// goroutine, so the float itself is the reader's alone and this is what anyone else reads.
-	published     atomic.Uint32
-	bandPublished atomic.Uint32
-	level         atomic.Uint32
-	clipped       atomic.Uint64
+	published      atomic.Uint32
+	bandPublished  atomic.Uint32
+	level          atomic.Uint32
+	active         atomic.Bool   // configured room gate, without visual release smoothing
+	activityFrames atomic.Uint64 // non-destructive observation of short raw gate crossings
+	clipped        atomic.Uint64
 }
 
 // forget throws away what has been learned, so switching leveling off and on again is a way out of
@@ -131,6 +133,7 @@ type leveler struct {
 func (l *leveler) forget() {
 	l.gain = float32(math.Pow(10, startGainDB/20))
 	l.floor, l.bandFloor = fullScale, fullScale
+	l.active.Store(false)
 	l.publish()
 }
 
@@ -274,6 +277,11 @@ func (l *leveler) publishLevel(rms float32) {
 	}
 	quiet := float64(l.quiet.Load())
 	want := float32(levelFrom(over, quiet, levelTopDB-quiet))
+	active := want > 0
+	l.active.Store(active)
+	if active {
+		l.activityFrames.Add(1)
+	}
 
 	was := math.Float32frombits(l.level.Load())
 	step := l.levelUp
@@ -384,3 +392,12 @@ func (s *Source) Clipped() uint64 { return s.leveler.clipped.Load() }
 func (s *Source) Level() float64 {
 	return float64(math.Float32frombits(s.leveler.level.Load()))
 }
+
+// SpeechActive observes the configured room gate before visual release.
+// It does not alter PCM or wake features.
+// It is acoustic activity, not a semantic speech recognizer.
+func (s *Source) SpeechActive() bool { return s.leveler.active.Load() }
+
+// SpeechActivityFrames lets slower observers see brief gate crossings without
+// clearing another consumer's peak or changing detection/audio processing.
+func (s *Source) SpeechActivityFrames() uint64 { return s.leveler.activityFrames.Load() }

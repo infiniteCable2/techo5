@@ -261,11 +261,13 @@ func networkID(ctx context.Context, ssid string) (string, error) {
 // address (address.go), which decides whether it holds there; otherwise by poking udhcpc for a lease,
 // as always. Never through a techo5-net that is not the one that knows fixed addresses (AddressSupported).
 func renewLease() {
-	if AddressSupported() && LoadAddress().Fixed {
+	if AddressSupported() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 		defer cancel()
-		if out, err := exec.CommandContext(ctx, netTool, "renew").CombinedOutput(); err != nil {
-			slog.Warn("wifi: techo5-net renew failed", "err", err, "out", strings.TrimSpace(string(out)))
+		// The address owner recognizes a new WLAN and starts fresh DHCP there.
+		// A CONNECTED event may already have done this; up leaves that lease intact.
+		if out, err := exec.CommandContext(ctx, netTool, "up").CombinedOutput(); err != nil {
+			slog.Warn("wifi: techo5-net up failed", "err", err, "out", strings.TrimSpace(string(out)))
 		}
 		return
 	}

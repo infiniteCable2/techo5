@@ -368,6 +368,15 @@ t5_wifi_up() {
 	if ! pidof wpa_supplicant >/dev/null; then
 		wpa_supplicant -B -i wlan0 -c "$conf" -P /run/wpa.pid > /tmp/wpa.log 2>&1
 	fi
+	# Link events enter the existing address owner, including automatic roaming.
+	# The owner serializes them with manual address changes and coalesces repeats.
+	if [ -x /etc/techo5/wifi-event.sh ]; then
+		watchpid=$(cat /run/techo5/wifi-events.pid 2>/dev/null)
+		case "$watchpid" in ''|*[!0-9]*) watchpid=0 ;; esac
+		if [ "$watchpid" = 0 ] || [ "$(cat /proc/$watchpid/comm 2>/dev/null)" != wpa_cli ]; then
+			wpa_cli -p /run/wpa -i wlan0 -B -P /run/techo5/wifi-events.pid -a /etc/techo5/wifi-event.sh
+		fi
+	fi
 	# No network to wait for: the supplicant is up for the screen to add one, and waiting out
 	# WIFI_WAIT would only hold the rest of the boot back.
 	# The lease client is started too, in the background: a network joined from the screen asks it for

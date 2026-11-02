@@ -1358,6 +1358,15 @@ func (d *Display) gesture(g touch.Gesture) {
 		d.wake()
 		return
 	}
+	if d.r != nil && d.r.scrollAnswer(g) {
+		d.mu.Lock()
+		if d.view.Phase == "idle" {
+			d.viewAt = now // allow time to read after a manual scroll
+		}
+		d.mu.Unlock()
+		d.wake()
+		return
+	}
 	switch g.Kind {
 	case touch.Hold:
 		d.clockHeld()
@@ -1368,7 +1377,7 @@ func (d *Display) gesture(g touch.Gesture) {
 		d.mu.Unlock()
 		// A finished turn's words: a tap puts them away. It used to start another turn, which is not
 		// what a hand put on an answer to clear it means.
-		if !weatherUp && d.answerUp(time.Now()) {
+		if !weatherUp && (d.answerUp(time.Now()) || (idle && d.r != nil && d.r.answerAnimating())) {
 			d.clearAnswer()
 			return
 		}
@@ -2522,7 +2531,9 @@ func (d *Display) frame() (next time.Duration) {
 
 	d.mu.Lock()
 	booting, started := d.booting, d.started
-	if booting && now.Sub(started) >= splashMin && homeAssistantHere() {
+	// The OpenClaw screen is usable offline; Gateway readiness belongs to Talk,
+	// not to admission to the local clock and network settings.
+	if booting && now.Sub(started) >= splashMin && (config.Get().OpenClaw.Enabled() || homeAssistantHere()) {
 		d.booting, booting = false, false
 		slog.Info("splash done", "after", now.Sub(started).Round(time.Millisecond))
 	}
@@ -2556,13 +2567,14 @@ func (d *Display) frame() (next time.Duration) {
 		return 80 * time.Millisecond
 	}
 
-	s := scene{now: now, phase: view.Phase, heard: view.Heard, reply: view.Reply, since: at, ring: ring, call: call}
+	s := scene{now: now, phase: view.Phase, heard: view.Heard, reply: view.Reply, playbackKnown: view.PlaybackKnown, speaking: view.Speaking, replyCursorKnown: view.ReplyCursorKnown, replyCursor: view.ReplyCursor, since: at, ring: ring, call: call}
 	s.atDoor = call.Phase != phone.Idle && doorbell.Get().AtDoor(now)
 	s.snooze = config.Get().Alarms.Snooze()
 	s.alarms = alarm.Get().View(now)
 	s.timers = timer.Get().List(now)
 	s.glance = home.Get().Glance()
-	if view.Phase == "idle" && (view.Heard != "" || view.Reply != "") && now.Sub(at) < linger() {
+	answerWasMoving := d.r.answerAnimating()
+	if view.Phase == "idle" && (view.Heard != "" || view.Reply != "") && (now.Sub(at) < linger() || answerWasMoving) {
 		s.phase = "lingering"
 	}
 	d.mu.Lock()
@@ -2829,6 +2841,13 @@ func (d *Display) frame() (next time.Duration) {
 		d.deckDrawn = key
 	}
 	d.r.draw(s)
+	if d.r.answerAnimating() {
+		defer func() { next = min(next, 100*time.Millisecond) }()
+	} else if answerWasMoving && s.phase == "lingering" {
+		d.mu.Lock()
+		d.viewAt = now // keep the last lines for the normal answer linger time
+		d.mu.Unlock()
+	}
 	if light, _ := cueOver(s); light && cueLit(s.cue) {
 		// The cue's light breathes and runs over whatever page is up; a page that moves faster (a
 		// photo changing, rain falling) keeps its own pace.

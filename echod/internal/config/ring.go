@@ -4,9 +4,10 @@ package config
 // Trouble and Muted are animations by name, or empty for none, and none of them are appearances the
 // light was set to: they outlive it being switched off and come back with it.
 type Ring struct {
-	Reaction string `json:"reaction"`
-	Trouble  string `json:"trouble"`
-	Muted    string `json:"muted"`
+	AutoBrightness bool   `json:"auto_brightness,omitempty"`
+	Reaction       string `json:"reaction"`
+	Trouble        string `json:"trouble"`
+	Muted          string `json:"muted"`
 
 	// Light is the appearance Home Assistant last set, so a restart comes back the way it was left.
 	Light Light `json:"light"`
@@ -56,6 +57,10 @@ func defaultRing() Ring {
 }
 
 type RingWriter struct{ st *Store }
+
+func (w RingWriter) AutoBrightness(v bool) error {
+	return w.st.Update(func(c *Config) { c.Ring.AutoBrightness = v })
+}
 
 func (w RingWriter) Reaction(v string) error {
 	return w.st.Update(func(c *Config) { c.Ring.Reaction = v })

@@ -56,6 +56,7 @@ type Config struct {
 	Share          Share          `json:"share,omitempty"`
 	Realtime       Realtime       `json:"realtime,omitempty"`
 	Tessera        Tessera        `json:"tessera,omitempty"`
+	OpenClaw       OpenClaw       `json:"openclaw,omitempty"`
 }
 
 // Defaults is a device nobody has set anything on.

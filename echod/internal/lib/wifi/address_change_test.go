@@ -64,6 +64,21 @@ func fixed50(t *testing.T) Address {
 	return a
 }
 
+func TestManualJoinUsesTheAddressOwnerForDHCPAndFixedSettings(t *testing.T) {
+	for _, fixed := range []bool{false, true} {
+		f := newFakeNet(t, "exit 0")
+		if fixed {
+			if err := os.WriteFile(addressFile, []byte(fixedConfFor(fixed50(t))), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		renewLease()
+		if f.ran() != "up" {
+			t.Fatal("manual join bypassed the address owner or forced a duplicate lease", fixed, f.ran())
+		}
+	}
+}
+
 // A trial that runs past its time is cut short, and the setting in use goes back on (techo5-net up):
 // the untried address may be on the interface with the DHCP client stopped.
 func TestATrialCutShortPutsTheSettingInUseBack(t *testing.T) {

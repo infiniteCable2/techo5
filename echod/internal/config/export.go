@@ -351,6 +351,9 @@ func ClearOwn(c *Config) { KeepOwn(c, Config{}) }
 
 // KeepOwn puts from's own things into c, in place of whatever c has.
 func KeepOwn(c *Config, from Config) {
+	// The paired Gateway and conversation target select where room audio goes.
+	// Keep the complete binding local, including paths to private credential state.
+	c.OpenClaw = from.OpenClaw
 	lockPIN := c.Security.LockPIN // a secret, kept or cleared by its own list
 	c.Security = from.Security
 	c.Security.LockPIN = lockPIN

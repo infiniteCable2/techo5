@@ -215,6 +215,8 @@ for m in ${WIFI_PRE_MODULES:-}; do
 	n=$(basename "$m" .ko | tr - _)
 	grep -q "^$n " /proc/modules || insmod "$m" 2>/tmp/insmod.err || log "wifi: insmod $m failed: $(cat /tmp/insmod.err)"
 done
+# The network worker must never delay the display or local wake engine.
+(
 t5_wifi_up $WIFI_MODULE $LOGDIR/wpa_supplicant.conf
 # Networks written into the file by hand reach a supplicant that started without any
 # (WIFI_CONF_WATCH, device.conf: athena).
@@ -226,12 +228,7 @@ if [ -n "$IP" ]; then
 	ntpd -S /etc/techo5/ntp-event.sh $(t5_ntp_peers) > /dev/null 2>&1
 fi
 
-# --- Bluetooth (only on a kernel that has it; see t5_bt_up).
-t5_bt_up "$BT_MODULE" /var/log
-
-# --- Network keeper: bring Wi-Fi back if it is gone, and reboot after 15 minutes
-# without an address — an unattended unit must never sit unreachable.
-(
+# --- Network keeper: retry the network without rebooting an offline device.
 	down=0; lost=0
 	while true; do
 		sleep 60
@@ -288,17 +285,6 @@ t5_bt_up "$BT_MODULE" /var/log
 		else
 			log "network: no address for $down min"
 		fi
-		if [ $down -ge 15 ]; then
-			# A kernel on trial is rebooted by its own loop below, which tells a boot that only
-			# lacked a network from one that failed: this reboot would count it as failed.
-			if [ -n "${KERNEL_UPDATE:-}" ] && grep -q '^trial' /data/techo5-linux/kernel/state 2>/dev/null; then
-				[ $down -eq 15 ] && log "network: down, but a kernel is on trial; its own loop reboots"
-			else
-				log "network: rebooting"
-				sync
-				reboot
-			fi
-		fi
 		killall udhcpc wpa_supplicant 2>/dev/null
 		# A new supplicant has no channel pin (t5_wifi_prefer5).
 		rm -f /run/techo5/prefer5-pin /run/techo5/prefer5-pin.miss
@@ -308,6 +294,9 @@ t5_bt_up "$BT_MODULE" /var/log
 		t5_wifi_up $WIFI_MODULE $LOGDIR/wpa_supplicant.conf
 	done
 ) &
+
+# --- Bluetooth (only on a kernel that has it; see t5_bt_up).
+t5_bt_up "$BT_MODULE" /var/log
 
 # --- Hardware that comes up late (HW_WAIT, device.conf: athena on mainline, whose sound card and
 # backlight probe ~11 s into the boot): the daemon opens them once, at its start, so it waits here.

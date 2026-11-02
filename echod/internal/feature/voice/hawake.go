@@ -436,6 +436,9 @@ func (c *conversation) mayStream() bool {
 // brain answers, nor for a word chosen for realtime voice (backendFor). Home Assistant hearing a word is
 // a turn on its pipeline, so it is never asked to listen for one of those.
 func haAnswers(slot int) bool {
+	if config.Get().OpenClaw.Enabled() {
+		return false
+	}
 	if config.Get().Brain.Direct() {
 		return false
 	}

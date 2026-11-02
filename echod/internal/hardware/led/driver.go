@@ -110,6 +110,8 @@ type Driver struct {
 	changed chan struct{}
 }
 
+func (d *Driver) SetRoomScale(factor float64) error { return d.ring.SetRoomScale(factor) }
+
 func NewDriver(r *Ring) *Driver {
 	d := &Driver{ring: r, changed: make(chan struct{}, 1)}
 

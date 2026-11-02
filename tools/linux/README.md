@@ -32,11 +32,25 @@ daemon's in-place updater) remounts it writable and back. `/etc/resolv.conf`
 and `/etc/dropbear` point at `/run` and `/data`.
 
 Inside the rootfs: busybox init (`etc/inittab`) runs `etc/techo5/boot.sh`
-once (devices, USB serial, Wi-Fi, clock, SSH, the slot-trial watcher, a
-network keeper that reboots after 15 minutes without an address), then keeps
+once (devices, USB serial, a background Wi-Fi/clock worker, SSH and the
+slot-trial watcher), then keeps
 `techo5-run` (the daemon) and `techo5-console` (root shell on the USB COM
 port) alive. The daemon is `/usr/local/bin/techo5`; the LineageOS `vendor`
 tree (Wi-Fi/BT modules, firmware, audio tuning) is copied in as `/vendor`.
+
+The display and local wake engine start without waiting for a saved WLAN or
+an IPv4 address. The network keeper retries unavailable networks in the
+background; being offline alone does not reboot the device. Slot/kernel trial
+safeguards still apply independently.
+
+The supplicant's `CONNECTED` events call the existing `techo5-net` address
+owner. It serializes address changes and requests a fresh DHCP lease when
+the SSID changes, replacing the previous IPv4 address, neighbor cache and
+resolver. Each DHCP client carries its requesting SSID into the lease hook,
+so a delayed reply cannot configure a different WLAN. Repeated events on the
+same WLAN retain its lease. The keeper also checks for a missed event.
+The OpenClaw client observes the network marker and reconnects both roles
+through their normal owners, without replaying an interrupted request.
 
 ## Updates and rollback
 

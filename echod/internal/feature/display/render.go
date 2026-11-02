@@ -43,16 +43,19 @@ var shade = color.RGBA{0x00, 0x00, 0x00, 0x90}
 type scene struct {
 	streaming bool // the camera is being streamed (feature/camstream)
 
-	now     time.Time
-	phase   string  // idle, listening, thinking, replying, lingering
-	eq      *eqView // a turn's bars, when turns are drawn as the equalizer
-	cue     string  // a turn's phase, when turns are a cue over the page and phase is idle (turn_cue.go)
-	heard   string
-	reply   string
-	since   time.Time
-	playing bool
-	paused  bool
-	muted   bool
+	now                     time.Time
+	phase                   string  // idle, listening, thinking, replying, lingering
+	eq                      *eqView // a turn's bars, when turns are drawn as the equalizer
+	cue                     string  // a turn's phase, when turns are a cue over the page and phase is idle (turn_cue.go)
+	heard                   string
+	reply                   string
+	playbackKnown, speaking bool
+	replyCursorKnown        bool
+	replyCursor             int
+	since                   time.Time
+	playing                 bool
+	paused                  bool
+	muted                   bool
 
 	// glance is the glance strip's chips (feature/home/glance.go), drawn at the foot of the clock page.
 	glance []home.Chip
@@ -279,8 +282,9 @@ type scene struct {
 // renderer draws scenes onto one canvas. Faces are made once: parsing a font is cheap, but
 // building a face at each size is not something to do per frame.
 type renderer struct {
-	paint        // the canvas, its size, and the settings screen's tap zones
-	climateParts // the thermostat sheet's, where it was last drawn (climate_sheet.go)
+	paint                   // the canvas, its size, and the settings screen's tap zones
+	climateParts            // the thermostat sheet's, where it was last drawn (climate_sheet.go)
+	answer       answerPage // full-size answer layout and its touch/automatic scroll
 	// glow is the Glow style's images, kept between frames (glow.go).
 	glow glowBuffers
 	// nixie is the Nixie style's tubes, kept between frames (nixie.go).
@@ -397,15 +401,16 @@ type renderer struct {
 	weatherKept []byte
 	weatherKey  string
 
-	clock  font.Face // the big time
-	big    font.Face // a large reading, like today's temperature
-	ampm   font.Face
-	title  font.Face // "Listening…"
-	body   font.Face // transcript and reply
-	small  font.Face // date, corner clock, footer
-	tiny   font.Face
-	micro  font.Face // an event's words on a day of the month
-	margin int
+	clock                      font.Face // the big time
+	big                        font.Face // a large reading, like today's temperature
+	ampm                       font.Face
+	title                      font.Face // "Listening…"
+	body                       font.Face // transcript and reply
+	answerBody, answerQuestion font.Face // large, scrollable conversation text
+	small                      font.Face // date, corner clock, footer
+	tiny                       font.Face
+	micro                      font.Face // an event's words on a day of the month
+	margin                     int
 
 	// base keeps the settings screen's unchanging part.
 	base    *image.RGBA
@@ -465,6 +470,7 @@ func newRenderer(dst *image.RGBA) *renderer {
 // makeFaces makes the renderer's faces in the font named (font.go). Sizes are points at 72 DPI, which
 // makes them pixels, so they scale with everything else.
 func (r *renderer) makeFaces(k fontKey) {
+	r.answer.layout = answerLayout{}
 	name := k.name
 	face := func(bold bool, size int) font.Face { return fontFace(name, bold, float64(r.s(size))) }
 	r.font, r.fontGen, r.styleFaces = name, k.gen, nil
@@ -473,6 +479,8 @@ func (r *renderer) makeFaces(k fontKey) {
 	r.ampm = face(true, 56)
 	r.title = face(true, 48)
 	r.body = face(false, 42)
+	r.answerBody = face(false, 59)
+	r.answerQuestion = face(false, 48)
 	r.small = face(false, 34)
 	r.tiny = face(false, 26)
 	r.micro = face(false, 18)
@@ -494,6 +502,7 @@ func (r *renderer) useFont() {
 // simpler than tracking what changed.
 func (r *renderer) draw(s scene) {
 	r.useFont()
+	r.beginAnswerFrame(s)
 	r.marked, r.footAt, r.lcarsDrawn = false, 0, false
 	defer r.streamingDot(s)  // over everything, the update overlay included: deferred first, drawn last
 	defer r.updateOverlay(s) // Draw update overlay at the end of frame using defer
@@ -705,11 +714,16 @@ func (r *renderer) draw(s scene) {
 	case "listening":
 		r.status(s, "Listening…", true)
 	case "thinking":
-		r.status(s, "Thinking…", true)
-		r.words(s.heard, "", r.s(200))
+		if s.reply != "" {
+			r.cornerClock(s)
+			r.words(s, r.s(70))
+		} else {
+			r.status(s, "Thinking…", true)
+			r.words(scene{heard: s.heard, now: s.now}, r.s(200))
+		}
 	case "replying", "lingering":
 		r.cornerClock(s)
-		r.words(s.heard, s.reply, r.s(70))
+		r.words(s, r.s(70))
 	default:
 		if s.sunrise > 0 {
 			// The light before an alarm takes the whole screen: the panel is the lamp in the room, and
@@ -1104,43 +1118,6 @@ func (r *renderer) status(s scene, title string, breathe bool) {
 		full := r.w - 2*r.margin
 		draw.Draw(r.dst, image.Rect(r.margin, r.s(140), r.margin+full, r.s(146)), image.NewUniform(ember), image.Point{}, draw.Src)
 		draw.Draw(r.dst, image.Rect(r.margin, r.s(140), r.margin+int(float64(full)*f), r.s(146)), image.NewUniform(amber), image.Point{}, draw.Src)
-	}
-}
-
-// words lays out what was heard, dimmed, and the reply beneath it, starting at top (in this panel's
-// pixels) and stopping at the footer. A long reply is shrunk one step before being cut.
-func (r *renderer) words(heard, reply string, top int) {
-	y := top
-	maxW := r.w - 2*r.margin
-	bottom := r.h - r.s(70)
-	if heard != "" {
-		for _, line := range r.wrap(r.small, "“"+heard+"”", maxW) {
-			if y+r.s(40) > bottom {
-				break
-			}
-			r.text(r.small, line, r.margin, y+r.s(30), dim)
-			y += r.s(42)
-		}
-		y += r.s(18)
-	}
-	if reply == "" {
-		return
-	}
-	face, lineH := r.body, r.s(52)
-	lines := r.wrap(face, reply, maxW)
-	if len(lines)*lineH > bottom-y {
-		face, lineH = r.small, r.s(42)
-		lines = r.wrap(face, reply, maxW)
-	}
-	for i, line := range lines {
-		if y+lineH > bottom {
-			if i > 0 {
-				r.text(face, "…", r.margin, y, cream)
-			}
-			break
-		}
-		r.text(face, line, r.margin, y+lineH-r.s(12), cream)
-		y += lineH
 	}
 }
 

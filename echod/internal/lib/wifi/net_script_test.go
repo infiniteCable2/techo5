@@ -36,6 +36,7 @@ case "$*" in
 "-4 addr show dev wlan0")
 	[ -s "$A" ] && while read -r a; do echo "    inet $a brd 0.0.0.0 scope global wlan0"; done < "$A" ;;
 "-4 addr flush dev wlan0") : > "$A"; rm -f "$R" ;;
+"-4 neigh flush dev wlan0") ;;
 "addr add "*) [ -e "$STUB/refuse" ] && exit 2; echo "$3" >> "$A" ;;
 "route replace default via "*) echo "default via $5 dev wlan0" > "$R" ;;
 "route show default") cat "$R" 2>/dev/null ;;
@@ -52,6 +53,7 @@ esac
 src=$(head -1 "$STUB/addrs" 2>/dev/null | cut -d/ -f1)
 grep -qx -e "$gw" -e "$gw from $src" "$STUB/answers" 2>/dev/null`,
 	"udhcpc": `echo "udhcpc $*" >> "$STUB/calls"
+printf '%s\n' "$TECHO5_DHCP_SSID_HEX" > "$STUB/dhcp-request-ssid"
 touch "$STUB/udhcpc-on"
 if [ -s "$STUB/lease" ]; then
 	cat "$STUB/lease" > "$STUB/addrs"
@@ -200,6 +202,7 @@ func (b *netBench) onDHCP() {
 	b.set("answers", "192.168.1.1\n")
 	b.set("run/resolv.conf", "search home.arpa\nnameserver 192.168.1.1\n")
 	b.set("run/techo5/network-applied", "dhcp\n")
+	b.set("run/techo5/network-dhcp-ssid", homeHex+"\n")
 }
 
 // onFixed is a device on its fixed address, kept, on Home, with the gateway answering and the two
@@ -220,6 +223,46 @@ func TestTechoNetScript(t *testing.T) {
 }
 
 func netScriptCases(t *testing.T, shell []string) {
+	t.Run("a different associated network gets fresh DHCP exactly once", func(t *testing.T) {
+		b := newNetBench(t, shell)
+		b.onDHCP()
+		b.set("ssid", "Guest\n")
+		b.set("lease", "198.51.100.77/24\n")
+		b.set("lease-gw", "198.51.100.1\n")
+		b.run("up")
+		if b.read("dhcp-request-ssid") != "4775657374" {
+			t.Fatal("DHCP client did not retain its requesting network")
+		}
+		if b.read("addrs") != "198.51.100.77/24" || !strings.Contains(b.read("route"), "198.51.100.1") || !strings.Contains(b.read("run/resolv.conf"), "198.51.100.1") {
+			t.Fatal("old network state survived", b.calls())
+		}
+		before := b.calls()
+		b.run("up")
+		b.run("check")
+		if b.calls() != before {
+			t.Fatal("duplicate association restarted DHCP", b.calls())
+		}
+	})
+	t.Run("missed association event is recovered by check", func(t *testing.T) {
+		b := newNetBench(t, shell)
+		b.onDHCP()
+		b.set("ssid", "Guest\n")
+		b.set("lease", "198.51.100.77/24\n")
+		b.set("lease-gw", "198.51.100.1\n")
+		b.run("check")
+		if b.read("addrs") != "198.51.100.77/24" {
+			t.Fatal("check kept previous lease")
+		}
+	})
+	t.Run("a radio roam on the same network retains its lease", func(t *testing.T) {
+		b := newNetBench(t, shell)
+		b.onDHCP()
+		b.run("up")
+		b.run("check")
+		if strings.Contains(b.calls(), "killall") || strings.Contains(b.calls(), "udhcpc ") {
+			t.Fatal("same network disrupted", b.calls())
+		}
+	})
 	t.Run("a trial that works is kept", func(t *testing.T) {
 		b := newNetBench(t, shell)
 		b.onDHCP()

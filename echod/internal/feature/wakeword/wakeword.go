@@ -59,6 +59,7 @@ type slot struct {
 	followUpTone *esphome.Select
 	maxListen    *esphome.Number
 	maxThink     *esphome.Number
+	noSpeech     *esphome.Number
 }
 
 var (
@@ -221,14 +222,24 @@ func newSlot(n int) slot {
 			Min: 5, Max: 300, Step: 5, Unit: "s",
 			Mode: esphome.NumberBox,
 		},
+		noSpeech: &esphome.Number{
+			Base: esphome.Base{
+				ObjectID: fmt.Sprintf("no_speech_%d", n+1),
+				Name:     "No speech timeout (OpenClaw)",
+				Icon:     "mdi:microphone-off",
+				Category: esphome.CategoryConfig,
+			},
+			Min: 1, Max: 60, Step: 1, Unit: "s",
+			Mode: esphome.NumberBox,
+		},
 	}
 
-	// All thirteen on a page of their own.
+	// The assistant's controls share its own page.
 	for _, b := range []*esphome.Base{
 		&s.wake.Base, &s.threshold.Base, &s.tone.Base, &s.effect.Base,
 		&s.thinking.Base, &s.replying.Base, &s.delivery.Base,
 		&s.buffer.Base, &s.followUp.Base, &s.followUps.Base, &s.followUpTone.Base,
-		&s.maxListen.Base, &s.maxThink.Base,
+		&s.maxListen.Base, &s.maxThink.Base, &s.noSpeech.Base,
 	} {
 		b.DeviceID = on
 	}
@@ -310,6 +321,14 @@ func newSlot(n int) slot {
 			slog.Error("saving the thinking limit failed", "slot", n+1, "err", err)
 		}
 	}
+	s.noSpeech.OnCommand = func(v float32) {
+		seconds := min(max(int(v), 1), 60)
+		if err := config.Set().Wake(n).NoSpeech(seconds); err != nil {
+			slog.Error("saving the no speech timeout failed", "slot", n+1, "err", err)
+			return
+		}
+		s.noSpeech.Set(float32(seconds))
+	}
 	return s
 }
 
@@ -387,7 +406,7 @@ func (w *WakeWord) Entities() []esphome.Entity {
 	ents := []esphome.Entity{w.cancel}
 	for _, s := range w.slots {
 		ents = append(ents, s.wake, s.threshold, s.tone, s.effect, s.thinking, s.replying,
-			s.delivery, s.buffer, s.followUp, s.followUps, s.followUpTone, s.maxListen, s.maxThink)
+			s.delivery, s.buffer, s.followUp, s.followUps, s.followUpTone, s.maxListen, s.maxThink, s.noSpeech)
 	}
 	return ents
 }
@@ -412,6 +431,7 @@ func (w *WakeWord) Restore(c config.Config) {
 		s.followUpTone.Set(followUpToneLabel(saved.FollowUpTone))
 		s.maxListen.Set(float32(saved.MaxListen))
 		s.maxThink.Set(float32(saved.MaxThink))
+		s.noSpeech.Set(float32(noSpeechSeconds(saved.NoSpeech)))
 	}
 	slog.Info("restored", "what", "wake word settings", "slots", len(w.slots))
 }

@@ -1,7 +1,9 @@
 package wakeword
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -9,6 +11,33 @@ import (
 	"github.com/HuskerMinion/techo5/echod/internal/config"
 	"github.com/HuskerMinion/techo5/echod/internal/hardware/speaker"
 )
+
+func TestNativeOpeningAndFollowupWindowsPersistIndependently(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	cfg := config.Defaults()
+	cfg.Wake.Words[0].NoSpeech = 0 // An installation saved before this field existed.
+	body, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, body, 0600); err != nil {
+		t.Fatal(err)
+	}
+	config.Use(path)
+	if NoSpeech(0) != 10*time.Second {
+		t.Fatal("old settings did not get the native ten-second opening window")
+	}
+	if err := config.Set().Wake(0).NoSpeech(23); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.Set().Wake(0).FollowUp(8); err != nil {
+		t.Fatal(err)
+	}
+	config.Use(path)
+	if NoSpeech(0) != 23*time.Second || FollowUp(0) != 8*time.Second {
+		t.Fatal("independent opening/follow-up settings did not survive reload")
+	}
+}
 
 // Quiet hours take the tone away. It is the same answer the turn asks for the microphone's history
 // and for the hold it keeps out of the tone, so a quiet hour is also what makes a turn send the audio

@@ -83,6 +83,18 @@ func MaxThink(slot int) time.Duration {
 	return time.Duration(saved(slot).MaxThink) * time.Second
 }
 
+// NoSpeech is the native Talk opening window; old settings use ten seconds.
+func NoSpeech(slot int) time.Duration {
+	return time.Duration(noSpeechSeconds(saved(slot).NoSpeech)) * time.Second
+}
+
+func noSpeechSeconds(seconds int) int {
+	if seconds <= 0 {
+		seconds = config.DefaultNoSpeech
+	}
+	return min(seconds, 60)
+}
+
 // Effect is the animation a slot plays, empty when it is turned off. The conversation runs it: this
 // only says which one, because which one is a setting.
 func Effect(slot int) string {

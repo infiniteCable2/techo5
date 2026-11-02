@@ -198,6 +198,9 @@ func (v *Voice) Handle(ctx context.Context, c *esphome.Conn, msg proto.Message) 
 // Run owns the conversation until ctx is canceled. Nothing happens on a wake word until it is
 // running.
 func (v *Voice) Run(ctx context.Context) error {
+	if err := v.turn.claw.run(ctx); err != nil {
+		return err
+	}
 	v.turn.Run(ctx)
 	return nil
 }
@@ -205,7 +208,12 @@ func (v *Voice) Run(ctx context.Context) error {
 // Ready reports whether Home Assistant has a voice pipeline listening. Wake detection runs before
 // that happens, but nothing can be done with a detection until it does, so this is what the device
 // shows on the ring while it comes up.
-func (v *Voice) Ready() bool { return v.vs.Subscribed() || config.Get().Brain.Direct() }
+func (v *Voice) Ready() bool {
+	if config.Get().OpenClaw.Enabled() {
+		return v.turn != nil && v.turn.claw.Ready()
+	}
+	return v.vs.Subscribed() || config.Get().Brain.Direct()
+}
 
 // HomeAssistant reports whether Home Assistant itself has a voice pipeline listening, whatever the
 // brain. Ready is always true with a direct brain, so it says nothing about whether Home Assistant
@@ -250,6 +258,9 @@ func (v *Voice) WokeAt(slot int, at time.Time) { v.open(slot, true, at) }
 func (v *Voice) CanAnswer(slot int) bool {
 	if micTaken() {
 		return false
+	}
+	if config.Get().OpenClaw.Enabled() {
+		return v.Ready()
 	}
 	if w := config.Get().Wake.Words; slot >= 0 && slot < len(w) && w[slot].Realtime {
 		return v.turn != nil && v.turn.realtime.Ready()
@@ -360,6 +371,7 @@ func (v *Voice) Interrupt() {
 			return
 		}
 	}
+	slog.Info("local stop word accepted", "phase", v.turn.Phase())
 	v.Stop()
 }
 
