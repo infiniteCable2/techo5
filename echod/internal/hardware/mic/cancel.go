@@ -12,7 +12,8 @@ import (
 // cancelTaps is how far the filter reaches, in samples, so 64 ms of tail. Not a setting: measured on
 // this enclosure, cancellation rises with every tap available — 16.5 dB at 256, 18.6 at 512, 23.0 at
 // 1024, 27.2 at 2048 — so there is no room-dependent best value to look for, only what the device can
-// afford. This costs 6.4% of a core, and only while something is playing.
+// afford. The original single filter measured 6.4% of a core; the guarded
+// two-path controller has a separate cost and only runs while something plays.
 const cancelTaps = 1024
 
 // cancelMu is how fast the filter adapts. It still takes 10 dB off the music within half a second of a
@@ -50,7 +51,7 @@ const refHold = Rate
 // once measured exactly as well as seven cancellers averaged, and 5 dB better than the center microphone
 // alone. Which path it reads is cancelInput's choice.
 type canceller struct {
-	filter *aec.Canceller
+	filter *aec.Guarded
 
 	// ext is WebRTC's canceller in a helper process (webrtc.go), used instead of filter while it is
 	// set and healthy. engine names which one the user asked for.
@@ -75,7 +76,7 @@ type canceller struct {
 }
 
 func newCanceller() *canceller {
-	f, err := aec.New(aec.Config{Taps: cancelTaps, Mu: cancelMu})
+	f, err := aec.NewGuarded(aec.Config{Taps: cancelTaps, Mu: cancelMu})
 	if err != nil {
 		// Only a bad Taps or Mu reaches this, and both are constants above.
 		slog.Error("echo cancellation unavailable", "err", err)
@@ -268,12 +269,17 @@ func (s *Source) CancelEngine() string {
 
 // SetAdapting stops or resumes the canceller learning, while it goes on canceling with what it has.
 //
-// Turn it off while somebody is being listened to. The filter cannot tell a voice it was never given a
-// reference for from an echo it predicted badly, so it treats the voice as its own error and fits itself
-// to it — at exactly the moment canceling matters. What it already learned stays correct: the room did
-// not change because somebody spoke.
+// Turn it off while somebody is being listened to. During playback the guarded
+// filter may learn a candidate, but only held-out validation can change the
+// output path. Neither learning nor promotion runs during explicit listening.
 func (s *Source) SetAdapting(on bool) {
 	if s.cancel != nil {
 		s.cancel.filter.SetAdapting(on)
 	}
+}
+
+// Adapting reports the builtin controller's learning/promotion permission,
+// independently of whether the playback reference currently carries audio.
+func (s *Source) Adapting() bool {
+	return s.cancel != nil && s.cancel.filter.Adapting()
 }

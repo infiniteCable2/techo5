@@ -332,6 +332,21 @@ Both timed word positions and the provisional reading clock use this geometry.
 Automatic scrolling only advances, respects the content limits and yields to
 manual swipes. Near the beginning or end, those limits can prevent centering.
 
+## Local echo learning
+
+The builtin AEC keeps its mild linear filter. A background candidate may learn
+from the hardware playback reference while the accepted output filter stays
+fixed. Coefficients are adopted only after improving a subsequent non-learning
+validation window, with a one-block crossfade. Clipped input and prolonged quiet
+discard unaccepted candidates. This adds no audio buffering, denoiser or model.
+
+Explicit listening freezes both learning and adoption. Thinking and playback
+allow guarded learning, so a cold filter can learn from an ordinary reply;
+holding the speaker for a conversation no longer freezes the whole turn.
+Follow-up capture freezes again. This is conservative adaptation control,
+not guaranteed separation of correlated voices or full-duplex admission.
+Wake/Stop routing, the configured engine and server processing are unchanged.
+
 ## Audit of the earlier Pi Voiceassistant
 
 The Pi path is already native at the speech/agent layer. Its device service

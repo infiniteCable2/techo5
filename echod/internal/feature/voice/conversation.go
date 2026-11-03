@@ -1525,6 +1525,9 @@ func (c *conversation) showPhase(override string) {
 
 func (c *conversation) enter(p phase) {
 	c.phase = p
+	// Protect explicit user capture, but do not freeze a cold echo filter for
+	// the whole turn. Playback learning is guarded by the existing AEC owner.
+	mic.Get().SetAdapting(p != phaseListening)
 	c.visible.Store(int32(p))
 	c.shown.Phase = p.String()
 	c.shown.PlaybackKnown = c.nativeTalk()
@@ -1565,11 +1568,6 @@ func (c *conversation) hold(on bool) {
 		return
 	}
 	c.holding = on
-
-	// Ducked music keeps playing under the whole turn, so the echo canceller has a live reference while
-	// somebody is talking — which is the one thing an adaptive filter must not learn from. Stop it
-	// learning for the duration; it goes on canceling with what it already knows.
-	mic.Get().SetAdapting(!on)
 
 	// Every background, not just the track: a room playing along with the rest of the house is also
 	// something a reply has to be heard over, and it is not the media player's to quieten.
