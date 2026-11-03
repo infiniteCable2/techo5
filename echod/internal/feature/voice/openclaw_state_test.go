@@ -101,16 +101,25 @@ func TestNativeEndpointWithoutConfirmedRequestKeepsTheSilenceGuard(t *testing.T)
 	}
 }
 
-func TestNativeAcceptedTranscriptCancelsTheOpeningGuard(t *testing.T) {
+func TestNativeAcceptedTranscriptConfirmsWithoutEndingCapture(t *testing.T) {
 	c, at, _ := nativeListeningTurn(t)
 	c.handle(event{kind: evHeard, text: "What time is it?"})
-	if c.phase != phaseThinking || c.noSpeech != nil {
-		t.Fatal("accepted input left the opening silence deadline armed")
+	if c.phase != phaseListening || c.noSpeech != nil || c.deadline == nil {
+		t.Fatal("accepted transcript ended capture or failed to arm its request budget")
+	}
+	budget := c.deadline
+	c.handle(event{kind: evHeard, text: "And what is the date?"})
+	if c.deadline != budget {
+		t.Fatal("another completed transcript restarted the request budget")
 	}
 	*at = at.Add(20 * time.Second)
 	c.handle(event{kind: evNoSpeechTimeout})
+	if c.phase != phaseListening {
+		t.Fatal("the old opening limit cut off accepted ongoing input")
+	}
+	c.handle(event{kind: evSpokeEnd, text: c.turn.ID()})
 	if c.phase != phaseThinking {
-		t.Fatal("the opening limit cut off a real processing request")
+		t.Fatal("the local endpoint did not end the accepted input")
 	}
 }
 
@@ -119,13 +128,17 @@ func TestNativeFollowupAcknowledgementCancelsTheOpeningGuard(t *testing.T) {
 	c.followUp = true
 	c.woke = false
 	c.handle(event{kind: evHeard, text: "Thank you."})
-	if c.phase != phaseThinking || c.noSpeech != nil {
-		t.Fatal("a brief follow-up acknowledgement retained the silence guard")
+	if c.phase != phaseListening || c.noSpeech != nil || c.deadline == nil {
+		t.Fatal("a follow-up transcript ended capture or retained the silence guard")
 	}
 	*at = at.Add(11 * time.Second)
 	c.handle(event{kind: evNoSpeechTimeout})
+	if c.phase != phaseListening {
+		t.Fatal("the old opening limit cut off an accepted follow-up")
+	}
+	c.handle(event{kind: evSpokeEnd, text: c.turn.ID()})
 	if c.phase != phaseThinking {
-		t.Fatal("the opening limit cut off an accepted follow-up")
+		t.Fatal("the follow-up's local endpoint did not submit it")
 	}
 }
 
