@@ -302,6 +302,11 @@ per-device firmware.
 
 ## Show reading focus
 
+Linux images automatically include Noto Emoji and its SIL Open Font License.
+The normal build and startup path install missing fallback assets without
+overwriting the device's own fonts; no manual font upload or runtime download
+is required. See [font provenance and packaging](../tools/fonts/NotoEmoji.md).
+
 With OpenClaw selected, the local clock and settings become available after
 the normal minimum splash time, independently of Gateway connectivity.
 

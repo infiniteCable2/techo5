@@ -154,7 +154,8 @@ cp "$INPUTS"/apks312/wpa_supplicant-2.9-*.apk "$INPUTS"/apks312/libssl1.1-*.apk 
 # scripts must reach the device with LF endings whatever the checkout did
 # (perl rather than sed -i, which macOS's sed spells differently)
 for f in "$STAGE"/tools/*.sh "$STAGE"/tools/slotctl "$STAGE"/tools/*.txt; do perl -pi -e 's/\r$//' "$f"; done
-find "$STAGE/overlay" -type f -exec perl -pi -e 's/\r$//' {} +
+# Bundled font files are binary too: the overlay now carries Noto Emoji.
+find "$STAGE/overlay" -type f ! -name '*.ttf' ! -name '*.otf' -exec perl -pi -e 's/\r$//' {} +
 # Wake word models ship in the image so a fresh unit answers to its default word; boot.sh copies
 # them into the state directory when it is empty. They go in after the line endings are fixed:
 # the models are binary, and stripping a CR before every LF byte corrupted three of four (v0.2.5).

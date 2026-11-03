@@ -62,6 +62,8 @@ mountpoint -q /store || mount -t ext4 -o ro,noatime $STORE_DEV /store
 mount -t tmpfs tmpfs /var/log
 mount -t tmpfs tmpfs /var/tmp
 mkdir -p /run/lock /run/techo5 $LOGDIR /data/misc/techo5/models
+# Seed bundled fallback fonts on fresh installs and image upgrades. Owner files stay put.
+/etc/techo5/seed-fonts.sh || log "bundled fallback fonts could not be installed"
 # /etc/hosts is a symlink to it: localhost here, and echod adds the .local names it looks up.
 [ -e /run/hosts ] || printf '127.0.0.1\tlocalhost localhost.localdomain\n::1\t\tlocalhost localhost.localdomain\n' > /run/hosts
 # The clock's zone lives on userdata (echod sets it from Home Assistant); a unit without one starts
