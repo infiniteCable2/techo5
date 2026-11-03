@@ -1,35 +1,39 @@
 package voice
 
 import (
+	"context"
 	"testing"
-	"time"
 )
 
-// The detector routes StopSlot without a call to Interrupt (detect/route_test).
+type stopAckClaw struct {
+	*fakeClaw
+	acknowledged chan struct{}
+}
+
+func (f *stopAckClaw) Call(ctx context.Context, method string, params any, result any) error {
+	err := f.fakeClaw.Call(ctx, method, params, result)
+	if err == nil && method == "talk.session.acknowledgeMark" {
+		close(f.acknowledged)
+	}
+	return err
+}
+
+// Outside a telephone call, the detector routes StopSlot directly to
+// Voice.Interrupt (detect/route_test).
 // Exercise the real remainder: a native reply claim, the
 // public stop-word entry, evCancel, local silence and native session.close.
 func TestStopWordInterruptRetiresNativeReplyAndPlayback(t *testing.T) {
 	c := thinkingTurn(t)
 	f := &fakeClaw{ready: true, supportsEnd: true, closed: make(chan struct{})}
 	b, _ := newTestClaw(t, f)
+	transport := &stopAckClaw{fakeClaw: f, acknowledged: make(chan struct{})}
+	b.client = transport
 	c.claw = b
 	c.be = b
 	if err := b.Start("synthetic"); err != nil {
 		t.Fatal(err)
 	}
-	end := time.Now().Add(3 * time.Second)
-	for {
-		b.mu.Lock()
-		ready := b.turn != nil && b.turn.id != ""
-		b.mu.Unlock()
-		if ready {
-			break
-		}
-		if time.Now().After(end) {
-			t.Fatal("native session not ready")
-		}
-		time.Sleep(time.Millisecond)
-	}
+	waitClaw(t, transport.acknowledged)
 	c.speak("")
 	claim := c.reply.claim
 	if claim == nil || !c.sound.Busy() {
