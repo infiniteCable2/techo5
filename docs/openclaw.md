@@ -33,16 +33,21 @@ independently approved scope set.
 Each logical voice conversation creates the following native media session:
 
 ```json
-{"mode":"stt-tts","transport":"gateway-relay","brain":"agent-consult","sessionKey":"agent:example:voice:echo-example"}
+{"mode":"stt-tts","transport":"gateway-relay","brain":"agent-consult","sessionKey":"agent:example:voice:echo-example","capabilities":["activity-v1","input-end"]}
 ```
 
 Select a device-specific key for an existing configured agent; the example name
 is fictional. That persistent key retains native history between media sessions.
 It does not imply access to an owner's private main or Matrix conversation.
-The exact `readyMark` is acknowledged only after the real speaker is acquired.
-Readiness is not proof that future audio was physically played. Bounded buffers
-retain real capture during cold setup and pace native TTS bursts into the
-existing player. Overflow fails visibly. Clear/cancel and replacement turns
+The create result must explicitly select `audio.inputEndMode: "client"` before
+the exact `readyMark` is acknowledged and before the device cue or capture.
+The mark is acknowledged only after the real speaker is acquired.
+Readiness is not proof that future audio was physically played. Capture waits
+for media admission and the configured cue. Its existing two-second microphone
+history bounds recovery of post-cue audio during delayed local capture setup;
+protected-window audio is never replayed. Bounded queues preserve captured input
+order and pace native TTS bursts into the existing player. Overflow fails visibly.
+Clear/cancel and replacement turns
 fence queued input, output and playback callbacks. Mutations are not blindly
 replayed after a disconnect or a canceled call.
 
@@ -73,13 +78,25 @@ playback completion and follow-up admission.
 ## Required matching Core and provider
 
 Use the Core candidate described in
-`openclaw/docs/plugins/sdk-migration/talk.md`. Its create result must declare
-`audio.supportsInputEnd: true`; otherwise this backend refuses capture before
-acknowledging readiness. The existing Echo endpoint stops capture locally;
-missing network data is not silence. End therefore uses the existing RPC:
+`openclaw/docs/plugins/sdk-migration/talk.md`. Echo advertises `input-end`, while
+the verified server source configuration selects the single input-end owner.
+The create result must declare both `audio.supportsInputEnd: true` and
+`audio.inputEndMode: "client"`. Server mode, a missing selection or an unknown
+selection fails clearly before readiness acknowledgement, cue or capture; Echo
+never silently falls back to competing server endpointing. Generic server-owned
+Talk remains available for other integrations through their own configuration.
+The matching provider must explicitly support client-owned completion.
+
+In client mode the server may observe/transcribe speech but does not dispatch
+independent pause-delimited requests. A completed user transcript can therefore
+confirm activity without ending Echo's still-open capture. The existing Echo
+endpoint stops capture locally; missing network data is not silence. Every PCM
+append and its end carry the same `captureId`, independently of optional activity
+telemetry. Connected follow-ups use fresh capture IDs on the same logical Talk.
+End uses the existing RPC:
 
 ```json
-{"sessionId":"returned-session-id","audioBase64":"","endOfInput":true}
+{"sessionId":"returned-session-id","audioBase64":"","captureId":"echo-input-example","endOfInput":true}
 ```
 
 This small optional native contract flushes real retained input through
@@ -88,6 +105,10 @@ not manufacture silence, close the session early, bypass speech/admission
 guards or change endpoint timers. The matching `openclaw-local-media` adapter
 implements this boundary including enhanced-frame drain. Build the matching
 Core/SDK and provider together and qualify them before deployment.
+The end acknowledgement seals the capture and records pending recognition;
+transcription and its result may finish asynchronously under that same identity.
+Coordinate the matching Core, verified source configuration and Echo binary at
+rollout; installing the device binary alone does not select client ownership.
 
 Agent Talk profiles, STT/TTS providers, voices and worker admission stay on the
 Gateway. The Echo adds no speech-processing/model parameters. Installing this

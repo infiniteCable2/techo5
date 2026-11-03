@@ -25,6 +25,8 @@ type fakeClaw struct {
 	ready          bool
 	supportsEnd    bool
 	activityEvents bool
+	inputEndMode string
+	omitInputEndMode bool
 	events         chan gw.Event
 }
 
@@ -42,9 +44,13 @@ func (f *fakeClaw) Call(ctx context.Context, method string, params any, result a
 				return ctx.Err()
 			}
 		}
-		data, _ := json.Marshal(map[string]any{"sessionId": "test-session", "readyMark": "media-ready:test", "audio": map[string]any{
-			"inputEncoding": "pcm16", "inputSampleRateHz": 16000, "outputEncoding": "pcm16", "outputSampleRateHz": 24000, "supportsInputEnd": f.supportsEnd, "activityEvents": f.activityEvents,
-		}})
+		mode := f.inputEndMode
+		if mode == "" { mode = "client" }
+		audio := map[string]any{
+			"inputEncoding": "pcm16", "inputSampleRateHz": 16000, "outputEncoding": "pcm16", "outputSampleRateHz": 24000, "supportsInputEnd": f.supportsEnd, "activityEvents": f.activityEvents, "inputEndMode": mode,
+		}
+		if f.omitInputEndMode { delete(audio, "inputEndMode") }
+		data, _ := json.Marshal(map[string]any{"sessionId": "test-session", "readyMark": "media-ready:test", "audio": audio})
 		return json.Unmarshal(data, result)
 	}
 	if method == "talk.session.appendAudio" && params.(map[string]any)["endOfInput"] == true {

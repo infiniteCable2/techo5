@@ -313,7 +313,7 @@ func TestClawActivityNegotiatesAndBindsEveryAppendWithoutExtraRPC(t *testing.T) 
 	f.mu.Lock()
 	calls := append([]clawCall(nil), f.calls...)
 	f.mu.Unlock()
-	if len(calls) != 4 || !reflect.DeepEqual(calls[0].params["capabilities"], []string{"activity-v1", "output-word-timings"}) {
+	if len(calls) != 4 || !reflect.DeepEqual(calls[0].params["capabilities"], []string{"activity-v1", "input-end", "output-word-timings"}) {
 		t.Fatal(calls)
 	}
 	capture, _ := calls[2].params["captureId"].(string)

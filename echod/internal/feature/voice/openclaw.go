@@ -456,6 +456,7 @@ func (b *clawBackend) transmit(t *clawTurn) {
 		ReadyMark         string                    `json:"readyMark"`
 		Audio             struct {
 			ActivityEvents   bool   `json:"activityEvents"`
+			InputEndMode     string `json:"inputEndMode"`
 			InputEncoding    string `json:"inputEncoding"`
 			InputRate        int    `json:"inputSampleRateHz"`
 			OutputEncoding   string `json:"outputEncoding"`
@@ -469,7 +470,7 @@ func (b *clawBackend) transmit(t *clawTurn) {
 	params := map[string]any{
 		"mode": "stt-tts", "transport": "gateway-relay", "brain": "agent-consult", "sessionKey": b.key,
 	}
-	capabilities := []string{"activity-v1"}
+	capabilities := []string{"activity-v1", "input-end"}
 	if b.wantTimings {
 		capabilities = append(capabilities, "output-word-timings")
 	}
@@ -488,6 +489,13 @@ func (b *clawBackend) transmit(t *clawTurn) {
 		created.Audio.InputEncoding != "pcm16" || created.Audio.InputRate != 16000 ||
 		created.Audio.OutputEncoding != "pcm16" || created.Audio.OutputRate != clawOutputRate {
 		b.emit(t, event{kind: evError, code: "openclaw-speech-contract"})
+		return
+	}
+	// The verified server source chooses the owner. Echo's local endpoint
+	// requires exclusive client completion; accepting server mode would create
+	// a second independent request boundary inside an open microphone capture.
+	if created.Audio.InputEndMode != "client" {
+		b.emit(t, event{kind: evError, code: "openclaw-input-end-contract", msg: "exclusive client input completion was not negotiated"})
 		return
 	}
 	b.mu.Lock()
@@ -559,10 +567,9 @@ func (b *clawBackend) transmit(t *clawTurn) {
 				fail(err.Error())
 				return
 			}
-			params := map[string]any{"sessionId": created.ID, "audioBase64": base64.StdEncoding.EncodeToString(input.audio)}
-			if created.Audio.ActivityEvents {
-				params["captureId"] = input.captureID
-			}
+			// Completion ownership and capture correlation are independent of
+			// optional activity observations, including for an empty capture.
+			params := map[string]any{"sessionId": created.ID, "audioBase64": base64.StdEncoding.EncodeToString(input.audio), "captureId": input.captureID}
 			if input.end {
 				params["endOfInput"] = true
 			}

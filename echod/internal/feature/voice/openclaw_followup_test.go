@@ -33,6 +33,7 @@ type followupGateway struct {
 	input          map[string][]byte
 	failAppend     bool
 	activityEvents bool
+	inputEndMode string
 }
 
 func newFollowupGateway() *followupGateway {
@@ -54,8 +55,10 @@ func (f *followupGateway) Call(_ context.Context, method string, params any, res
 	switch method {
 	case "talk.session.create":
 		f.serial++
+		mode := f.inputEndMode
+		if mode == "" { mode = "client" }
 		data, _ := json.Marshal(map[string]any{"sessionId": fmt.Sprintf("conversation-%d", f.serial), "readyMark": "media-ready:example", "audio": map[string]any{
-			"inputEncoding": "pcm16", "inputSampleRateHz": 16000, "outputEncoding": "pcm16", "outputSampleRateHz": 24000, "supportsInputEnd": true, "activityEvents": f.activityEvents,
+			"inputEncoding": "pcm16", "inputSampleRateHz": 16000, "outputEncoding": "pcm16", "outputSampleRateHz": 24000, "supportsInputEnd": true, "activityEvents": f.activityEvents, "inputEndMode": mode,
 		}})
 		return json.Unmarshal(data, result)
 	case "talk.session.appendAudio":
@@ -192,14 +195,22 @@ func TestTalkConnectedFollowupKeepsLogicalIDAndSpokenAnswer(t *testing.T) {
 	f.mu.Lock()
 	confirmed, creates := f.confirmed, f.serial
 	var closed int
+	var inputCaptures []string
 	for _, call := range f.calls {
 		if call.method == "talk.session.close" {
 			closed++
+		}
+		if call.method == "talk.session.appendAudio" {
+			capture, _ := call.params["captureId"].(string)
+			inputCaptures = append(inputCaptures, capture)
 		}
 	}
 	f.mu.Unlock()
 	if !confirmed || creates != 1 || closed != 0 {
 		t.Fatalf("pending answer lost: confirmed=%v creates=%d closes=%d", confirmed, creates, closed)
+	}
+	if len(inputCaptures) != 4 || inputCaptures[0] == "" || inputCaptures[2] == "" || inputCaptures[0] != inputCaptures[1] || inputCaptures[2] != inputCaptures[3] || inputCaptures[0] == inputCaptures[2] {
+		t.Fatal("follow-up did not keep distinct capture boundaries without telemetry", inputCaptures)
 	}
 	c.handle(event{kind: evCancel})
 	if got := waitFollowupID(t, f.closes); got != id {
