@@ -15,10 +15,11 @@ import (
 
 // The existing acoustic leaf supplies numbered PCM. Capture, framing, sender,
 // Gateway adapter, reply stream and speaker claim all remain the real owners.
-// Draining the in-memory player below represents hardware consumption; no device
-// is opened. Cue timing has its separate existing speaker/stream regressions.
+// The unstarted in-memory player cannot accept PCM: its real empty claim still
+// completes, but proves no physical playback or drain. Existing buffer/cue tests
+// own those boundaries. No device is opened here.
 func TestNativeTranscriptKeepsRepeatedCaptureTailBeforeLocalEnd(t *testing.T) {
-	c, f, id := connectedReply(t)
+	c, f, id := connectedReply(t, true)
 	c.speaker = speaker.New()
 	c.sound = speaker.NewDriver(c.speaker)
 	at := time.Unix(100, 0)
@@ -133,7 +134,8 @@ func TestNativeTranscriptKeepsRepeatedCaptureTailBeforeLocalEnd(t *testing.T) {
 		if round == 1 {
 			break
 		}
-		// Exercise the real reply/player claim before opening another capture.
+		// Exercise reply/empty-claim completion before another capture. This
+		// does not prove PCM playback or hardware drain with no device open.
 		for _, packet := range []string{
 			`{"sessionId":%q,"type":"event","talkEvent":{"type":"output.audio.started"}}`,
 			`{"sessionId":%q,"type":"audio","audioBase64":"AQACAA=="}`,
@@ -144,14 +146,12 @@ func TestNativeTranscriptKeepsRepeatedCaptureTailBeforeLocalEnd(t *testing.T) {
 		for !c.nativeFinished {
 			handleNext(t, c)
 		}
-		waitUntilT(t, func() bool { return c.speaker.Queued() > 0 })
 		if c.phase != phaseReplying || c.pending != nil {
-			t.Fatal("reply opened capture before local drain")
+			t.Fatal("reply opened capture before its local claim completed")
 		}
-		c.speaker.Drain()
 		drained = next(t, c, evPlayed)
 		if c.phase != phaseReplying {
-			t.Fatal("local drain event was bypassed")
+			t.Fatal("local claim completion event was bypassed")
 		}
 	}
 }
