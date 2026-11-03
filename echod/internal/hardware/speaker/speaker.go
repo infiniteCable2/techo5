@@ -86,6 +86,7 @@ const (
 // Player owns the speaker: one playback stream held open for the life of the process, with the
 // amplifier enabled while it runs.
 type Player struct {
+	cue *cueMark // guarded by mu; at most one accepted wake-cue observation
 	// The hardware, taken by Start and let go by Close. Nil in between: the handle outlives the
 	// device so that a restart can take it again without everything holding a Player being rebuilt.
 	devMu sync.Mutex
@@ -753,14 +754,18 @@ func (p *Player) Run(ctx context.Context) error {
 
 		// An amplifier waking from its idle sleep (idle.go) is not ready for what is queued: the queue
 		// waits, and the card gets silence, until it is.
+		var cue *cueMark
 		if p.gate != nil && p.idleStep() {
 			clear(buf)
 		} else {
-			p.fill(buf)
+			cue = p.fill(buf)
 		}
 		spectrum.Speaker.PushStereo(buf)
 		to := buf
 		if s := p.sink.Load(); s != nil {
+			p.mu.Lock()
+			p.retireCueLocked()
+			p.mu.Unlock()
 			// The sink gets the audio; the codec keeps its pace on silence.
 			s.push(buf)
 			to = silence
@@ -775,11 +780,15 @@ func (p *Player) Run(ctx context.Context) error {
 			to = wide
 		}
 		if err := p.send(ctx, pb, to); err != nil {
+			p.mu.Lock()
+			p.retireCueLocked()
+			p.mu.Unlock()
 			if ctx.Err() != nil {
 				return nil
 			}
 			return err
 		}
+		p.handedCue(cue, time.Now())
 		if !p.playing.Load() {
 			if muted++; muted >= unmuteAfter {
 				p.playing.Store(true)
@@ -898,7 +907,7 @@ func (p *Player) send(ctx context.Context, to io.Writer, buf []byte) error {
 }
 
 // fill takes what is queued and pads the rest with silence.
-func (p *Player) fill(buf []byte) {
+func (p *Player) fill(buf []byte) (cue *cueMark) {
 	p.mu.Lock()
 	take := min(len(p.pending), period*Channels)
 	chunk := p.pending[:take]
@@ -907,6 +916,7 @@ func (p *Player) fill(buf []byte) {
 		p.pending = nil
 	}
 	p.overlay = max(0, p.overlay-take)
+	cue = p.takeCueLocked(take)
 	bedTake := min(len(p.bed), period*Channels)
 	bed := p.bed[:bedTake]
 	p.bed = p.bed[bedTake:]
@@ -1090,6 +1100,7 @@ func (p *Player) fill(buf []byte) {
 		binary.LittleEndian.PutUint16(buf[i*2:], uint16(clamp16(p.lanes[0][j]*full*post)))
 		binary.LittleEndian.PutUint16(buf[(i+1)*2:], uint16(clamp16(right[j]*full*post)))
 	}
+	return
 }
 
 // render asks the Source for this period. Called only from the write loop, so the buffer is reused.
@@ -1136,6 +1147,7 @@ func (p *Player) Take() []int16 {
 	defer p.mu.Unlock()
 
 	pending := p.pending
+	p.retireCueLocked()
 	p.pending = nil
 	p.overlay = 0
 	return pending
@@ -1164,6 +1176,7 @@ func (p *Player) PlayVoice(mono []int16) {
 // with it: whatever comes next is a different utterance.
 func (p *Player) Drain() {
 	p.mu.Lock()
+	p.retireCueLocked()
 	p.pending = nil
 	p.overlay = 0
 	p.mu.Unlock()
@@ -1267,11 +1280,15 @@ func (p *Player) Beep(freq float64, ms int, level float64) {
 // is a reply's cushion or, when the reply came as a file, all of it, and a beep that waits is a beep
 // that arrives after the answer.
 func (p *Player) Chime(level float64, notes ...Note) {
+	p.Overlay(chimeSamples(level, notes...))
+}
+
+func chimeSamples(level float64, notes ...Note) []int16 {
 	var out []int16
 	for _, n := range notes {
 		out = append(out, tone(n, level)...)
 	}
-	p.Overlay(out)
+	return out
 }
 
 // Overlay mixes samples into what is already queued, extending the queue if they outlast it. Sums are
@@ -1284,6 +1301,10 @@ func (p *Player) Overlay(samples []int16) {
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.overlayLocked(samples)
+}
+
+func (p *Player) overlayLocked(samples []int16) {
 	p.pending = mix(p.pending, samples)
 	p.overlaid(len(samples))
 }
@@ -1460,6 +1481,9 @@ func (p *Player) Close() error {
 	pb, mixer, hold := p.pb, p.mixer, p.hold
 	p.pb, p.mixer, p.hold = nil, nil, nil
 	p.devMu.Unlock()
+	p.mu.Lock()
+	p.retireCueLocked()
+	p.mu.Unlock()
 	p.ring.Store(nil) // the next device says afresh
 
 	if mixer != nil {

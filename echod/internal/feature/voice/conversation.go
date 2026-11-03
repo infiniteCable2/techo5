@@ -169,6 +169,7 @@ type conversation struct {
 	be       backend
 
 	source  captureSource
+	captureCue captureCue
 	speaker *speaker.Player
 
 	// sound is who may make one. Everything audible goes through it, so canceling is one call
@@ -1180,7 +1181,12 @@ func (c *conversation) start(n nextTurn) bool {
 	// A follow-up chimes like the wake word that started the conversation, unless the slot has been
 	// told a follow-up should be silent: the microphone is open again with nothing said to say so. It
 	// is not a wake, though, so it does not report a phrase nobody spoke.
-	wakeword.Chime(slot, n.followUp)
+	c.captureCue = nil
+	if c.nativeTalk() {
+		if cue := wakeword.ChimeForCapture(slot, n.followUp); cue != nil { c.captureCue = cue }
+	} else {
+		wakeword.Chime(slot, n.followUp)
+	}
 	if !n.followUp {
 		c.log.Woke(phrase)
 	}
@@ -1276,6 +1282,7 @@ func deviceEnds(be backend, followUp bool) bool {
 // and is waiting on an answer, which is a different thing to be doing and looks like one.
 func (c *conversation) think() {
 	c.stopStreaming()
+	c.captureCue = nil
 	c.enter(phaseThinking)
 	c.arm(wakeword.MaxThink(c.slot))
 
@@ -1367,6 +1374,7 @@ func (c *conversation) finish(why string, how activity.Ending, keepTalk bool) bo
 	keptTalk := false
 	was := c.phase
 	c.stopStreaming()
+	c.captureCue = nil
 	c.disarm()
 	c.disarmNoSpeech()
 	c.nativeSpeaking = false
@@ -1667,6 +1675,8 @@ func (c *conversation) startAudio(slot int, followUp, continued bool, waited tim
 	id := c.turn.ID()
 	be := c.be
 	scope := c.clawSends
+	cue := c.captureCue
+	opened := c.opened
 	// A call up meanwhile holds the far end back from the room for as long as this listens (phone's
 	// playFarEnd), so the caller does not speak into the turn.
 	listened := phone.Get().TurnListening()
@@ -1674,7 +1684,7 @@ func (c *conversation) startAudio(slot int, followUp, continued bool, waited tim
 	safe.Go("turn audio", func() {
 		defer streams.Done()
 		defer listened()
-		c.stream(ctx, be, slot, followUp, continued, id, waited, scope)
+		c.stream(ctx, be, slot, followUp, continued, id, waited, scope, cue, opened)
 	})
 }
 
@@ -1697,10 +1707,7 @@ func (c *conversation) stopStreaming() {
 }
 
 // stream sends microphone frames until it is told to stop.
-func (c *conversation) stream(ctx context.Context, be backend, slot int, followUp, continued bool, id string, waited time.Duration, scope *clawSendScope) {
-	frames, pre, unlisten := c.source.ListenHistory("turn", mic.History+waited)
-	defer unlisten()
-
+func (c *conversation) stream(ctx context.Context, be backend, slot int, followUp, continued bool, id string, waited time.Duration, scope *clawSendScope, cue captureCue, opened time.Time) {
 	buf := make([]byte, 0, mic.FrameSamples*2)
 	_, native := be.(*clawBackend)
 	framed := nativeInputFrames{emit: func(pcm []byte) { c.sendAudio(be, pcm, scope) }}
@@ -1714,6 +1721,43 @@ func (c *conversation) stream(ctx context.Context, be backend, slot int, followU
 		}
 		slog.Info("native VAD ready", "model", "micro-vad-v2", "model_bytes", 34328, "end_silence_ms", input.silence.Milliseconds())
 	}
+	var after time.Time
+	if native {
+		if cue != nil {
+			var err error
+			after, err = cue.Wait(ctx)
+			if err != nil {
+				if ctx.Err() == nil { c.post(event{kind: evError, code: "openclaw-cue", clawSend: scope}) }
+				return
+			}
+			if delay := after.Sub(c.now()); delay > 0 {
+				timer := time.NewTimer(delay)
+				defer timer.Stop()
+				select { case <-ctx.Done(): return; case <-timer.C: }
+			}
+		} else if followUp {
+			// With no cue, a follow-up starts at admission, never in old TTS.
+			after = opened
+		}
+	}
+	if native && after.IsZero() && !opened.IsZero() { after = opened.Add(-mic.History) }
+	if ctx.Err() != nil { return }
+	var frames <-chan []int16
+	var pre []int16
+	var unlisten func()
+	if native && !after.IsZero() {
+		var err error
+		frames, pre, unlisten, err = c.source.ListenSince("turn", after)
+		if err != nil {
+			c.post(event{kind: evError, code: "openclaw-capture-history", clawSend: scope})
+			return
+		}
+	} else {
+		history := mic.History+waited
+		if native && followUp { history = 0 }
+		frames, pre, unlisten = c.source.ListenHistory("turn", history)
+	}
+	defer unlisten()
 
 	// Send what was already said before this turn began. The wake word can only be recognized after
 	// it has been spoken, and people run straight on into the request, so the opening words exist only
@@ -1722,7 +1766,7 @@ func (c *conversation) stream(ctx context.Context, be backend, slot int, followU
 	// A slot that chimes does not send it: whoever is talking waits for the tone, so the history holds
 	// the wake word rather than the request, and the tone itself is louder at the array than they are.
 	// That is as true of a wake Home Assistant's engine heard.
-	if wakeword.Tones(slot, followUp) {
+	if !native && wakeword.Tones(slot, followUp) {
 		pre = nil
 	}
 
@@ -1790,7 +1834,7 @@ func (c *conversation) stream(ctx context.Context, be backend, slot int, followU
 	// nothing is sent while it is sounding. What the speaker still has queued says when that is, and
 	// hardwareTail is what the driver holds after the queue runs out.
 	var sounding time.Time
-	if wakeword.Tones(slot, followUp) {
+	if !native && wakeword.Tones(slot, followUp) {
 		sounding = c.now().Add(wakeword.ChimeLength(slot, followUp) + speaker.HardwareTail)
 	}
 	var held int

@@ -16,6 +16,7 @@ type clawActivitySnapshot struct {
 		Phase     string `json:"phase"`
 		CaptureID string `json:"captureId"`
 		Pending   int    `json:"pending"`
+		Available *bool  `json:"available,omitempty"`
 	} `json:"input"`
 	Work struct {
 		Pending int `json:"pending"`
@@ -41,6 +42,7 @@ type clawActivity struct {
 	settlementQueued             bool
 	seq, snapshotSeq, outcomeSeq uint64
 	snapshot                     clawActivitySnapshot
+	inputAvailable               *bool
 	terminal                     string
 }
 
@@ -138,6 +140,9 @@ func (b *clawBackend) receiveActivity(t *clawTurn, fence clawFence, raw json.Raw
 			return
 		}
 		a.snapshot, a.snapshotSeq = snapshot, e.Seq
+		if snapshot.Input.Available != nil {
+			a.inputAvailable = snapshot.Input.Available
+		}
 	case "input.outcome":
 		var outcome struct {
 			Version int    `json:"version"`
@@ -166,6 +171,10 @@ func (b *clawBackend) receiveActivity(t *clawTurn, fence clawFence, raw json.Raw
 		return
 	}
 	a.seq = e.Seq
+	select {
+	case t.inputWake <- struct{}{}:
+	default:
+	}
 	settle := a.view().settled
 	b.mu.Unlock()
 	b.emitFrom(t, fence, event{kind: evClawActivity})

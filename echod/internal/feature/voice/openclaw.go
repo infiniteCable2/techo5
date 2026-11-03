@@ -47,6 +47,7 @@ type clawTurn struct {
 	generation    int
 	id            string
 	input         chan clawInput
+	inputWake     chan struct{}
 	inputEnded    bool
 	outputEnded   bool
 	followUpReady bool
@@ -98,6 +99,7 @@ type clawBackend struct {
 	observe       func(event) // best-effort progress must not block required audio delivery
 	playbackReady func() bool
 	wantTimings   bool
+	inputWaiting  func() // optional observation of an owned readiness wait; never admits capture
 }
 
 func newClaw(post func(event)) *clawBackend {
@@ -188,7 +190,7 @@ func (b *clawBackend) startInputFrom(gen int, followUp bool, selected ...config.
 	// Capture and processing have their own inactivity limits. A wall-clock
 	// deadline here would cut off a healthy long reply, including buffered audio.
 	ctx, cancel := context.WithCancel(b.ctx)
-	t := &clawTurn{ctx: ctx, cancel: cancel, generation: b.gen, input: make(chan clawInput, 750), outputWake: make(chan struct{}, 1)}
+	t := &clawTurn{ctx: ctx, cancel: cancel, generation: b.gen, input: make(chan clawInput, 750), inputWake: make(chan struct{}, 1), outputWake: make(chan struct{}, 1)}
 	t.captureID = fmt.Sprintf("echo-input-%d", b.gen)
 	t.connection = b.connectionGeneration()
 	if len(selected) == 1 {
@@ -524,16 +526,20 @@ func (b *clawBackend) transmit(t *clawTurn) {
 		fail("talk.session.acknowledgeMark")
 		return
 	}
+	var startedCapture string
 	for {
 		select {
 		case <-t.ctx.Done():
 			return
 		case input := <-t.input:
-			b.mu.Lock()
-			currentSource := b.sameSource(t)
-			b.mu.Unlock()
-			if !currentSource {
-				fail("OpenClaw selected source changed")
+			if len(input.audio) > 0 && input.captureID != startedCapture {
+				if err := b.waitInputReady(t, input.captureID); err != nil {
+					fail(err.Error())
+					return
+				}
+			}
+			if err := b.inputCurrent(t, input.captureID); err != nil {
+				fail(err.Error())
 				return
 			}
 			params := map[string]any{"sessionId": created.ID, "audioBase64": base64.StdEncoding.EncodeToString(input.audio)}
@@ -546,6 +552,9 @@ func (b *clawBackend) transmit(t *clawTurn) {
 			if err := b.client.Call(t.ctx, "talk.session.appendAudio", params, nil); err != nil {
 				fail("talk.session.appendAudio")
 				return
+			}
+			if len(input.audio) > 0 {
+				startedCapture = input.captureID
 			}
 		}
 	}
@@ -579,9 +588,18 @@ func (b *clawBackend) checkConnection() {
 	b.mu.Lock()
 	t := b.turn
 	disconnected := t != nil && !b.sameConnection(t)
+	sourceChanged := t != nil && !b.sameSource(t)
+	if disconnected || sourceChanged {
+		select {
+		case t.inputWake <- struct{}{}:
+		default:
+		}
+	}
 	b.mu.Unlock()
 	if disconnected {
 		b.emit(t, event{kind: evError, code: "openclaw-disconnected"})
+	} else if sourceChanged {
+		b.emit(t, event{kind: evError, code: "openclaw-source-changed"})
 	}
 }
 

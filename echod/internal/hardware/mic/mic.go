@@ -235,6 +235,7 @@ func (s *Source) device() capture {
 
 type listener struct {
 	name    string
+	after   time.Time
 	ch      chan []int16
 	dropped uint64
 	told    uint64
@@ -245,12 +246,12 @@ type listener struct {
 func (s *Source) Listen(name string) (<-chan []int16, func()) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.listenLocked(name)
+	return s.listenLocked(name, time.Time{})
 }
 
 // listenLocked registers a listener with mu held, including while history is copied.
-func (s *Source) listenLocked(name string) (<-chan []int16, func()) {
-	l := &listener{name: name, ch: make(chan []int16, 8)}
+func (s *Source) listenLocked(name string, after time.Time) (<-chan []int16, func()) {
+	l := &listener{name: name, after: after, ch: make(chan []int16, 8)}
 	id := s.next
 	s.next++
 	s.listeners[id] = l
@@ -324,6 +325,7 @@ func (s *Source) Run(ctx context.Context) error {
 		return errors.New("mic: the capture device is not held")
 	}
 	raw := make([]byte, FrameSamples*Channels*Bits/8)
+	s.history.discontinue(time.Now())
 
 	var overruns uint64
 	report := time.NewTicker(dropReport)
@@ -341,7 +343,9 @@ func (s *Source) Run(ctx context.Context) error {
 		}
 
 		n, err := pcm.Read(raw)
+		readAt := time.Now()
 		if err != nil {
+			s.history.discontinue(readAt)
 			if errors.Is(err, alsa.ErrOverrun) {
 				if overruns++; overruns == 1 || overruns%100 == 0 {
 					slog.Warn("capture overrun", "times", overruns)
@@ -355,7 +359,7 @@ func (s *Source) Run(ctx context.Context) error {
 			}
 			return err
 		}
-		s.broadcast(raw[:n])
+		s.broadcastAt(raw[:n], readAt)
 	}
 }
 
@@ -381,6 +385,12 @@ func (s *Source) reportDrops() {
 // broadcast hands the frame to every listener, dropping it for any that is behind. The mono mix is
 // only computed when something wants it.
 func (s *Source) broadcast(raw []byte) {
+	s.broadcastAt(raw, time.Now())
+}
+
+// at is recorded before taking mu or running the mixer/AEC, so processing
+// latency cannot move a pre-cue frame to the other side of the boundary.
+func (s *Source) broadcastAt(raw []byte, at time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -457,10 +467,11 @@ func (s *Source) broadcast(raw []byte) {
 		}
 	}
 	s.wasLeveling = on
-	s.remember(frame)
+	s.remember(frame, at)
 	spectrum.Mic.Push(frame)
 
 	for _, l := range s.listeners {
+		if !l.after.IsZero() && at.Add(-time.Duration(len(frame))*time.Second/Rate).Before(l.after) { continue }
 		select {
 		case l.ch <- frame:
 		default:
