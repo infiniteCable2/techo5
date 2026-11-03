@@ -5,6 +5,8 @@ import (
 	"reflect"
 	"testing"
 	"time"
+
+	"github.com/HuskerMinion/techo5/echod/internal/config"
 )
 
 type cuePlayback struct{}
@@ -54,6 +56,7 @@ func TestCueRetirementAndWaitCancellationDoNotFabricatePlayback(t *testing.T) {
 	for _, action := range []string{"drain", "take", "replace", "close"} {
 		t.Run(action, func(t *testing.T) {
 			p := newTestPlayer()
+			p.voice, _ = NewResampler(config.DefaultResampling)
 			p.pb = &cuePlayback{}
 			cue := p.ChimeCue(.3, 10*time.Millisecond, Note{Freq: 500, Ms: 20})
 			buf := make([]byte, period*Channels*2)
@@ -78,6 +81,7 @@ func TestCueRetirementAndWaitCancellationDoNotFabricatePlayback(t *testing.T) {
 		})
 	}
 	p := newTestPlayer()
+	p.voice, _ = NewResampler(config.DefaultResampling)
 	p.pb = &cuePlayback{}
 	cue := p.ChimeCue(.3, 10*time.Millisecond, Note{Freq: 500, Ms: 20})
 	ctx, cancel := context.WithCancel(context.Background())
