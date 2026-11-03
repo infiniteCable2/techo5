@@ -749,6 +749,11 @@ func (c *conversation) turnEvent(e event) {
 
 	case evHeard:
 		if c.nativeTalk() && strings.TrimSpace(e.text) != "" {
+			if c.phase == phaseListening && c.turn != nil {
+				// Accepted text confirms the request budget once. It is not a
+				// new audio/VAD event and does not end the microphone capture.
+				c.turnEvent(event{kind: evSpeaking, text: c.turn.ID()})
+			}
 			c.disarmNoSpeech()
 		}
 		if pageAsked(e.text) {
@@ -801,9 +806,9 @@ func (c *conversation) turnEvent(e event) {
 			c.callFromTurn(who, words, ready)
 			return
 		}
-		// Realtime voice's listening is ended by this device hearing the speaker finish (evSpokeEnd),
-		// never by a transcript, which can be of part of the question.
-		if c.phase == phaseListening && !rt {
+		// Realtime and native Talk transcripts can finish one utterance while
+		// capture is still open. Their local endpoint owns the input boundary.
+		if c.phase == phaseListening && !rt && !c.nativeTalk() {
 			c.think()
 		}
 
