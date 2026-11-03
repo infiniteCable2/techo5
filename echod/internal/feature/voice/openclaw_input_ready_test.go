@@ -132,14 +132,20 @@ func TestTalkInputReadyPreparesCaptureBeforeAdmittingPCM(t *testing.T) {
 	inputReadySnapshot(b, 3, &yes)
 	select {
 	case err := <-ready:
-		if err != nil { t.Fatal(err) }
-	case <-time.After(3*time.Second):
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
 		t.Fatal("capture readiness did not settle")
 	}
 	pcm := []byte{1, 0, 2, 0}
-	if err := b.Audio(pcm); err != nil { t.Fatal(err) }
+	if err := b.Audio(pcm); err != nil {
+		t.Fatal(err)
+	}
 	pcm[0] = 99
-	if err := b.End(); err != nil { t.Fatal(err) }
+	if err := b.End(); err != nil {
+		t.Fatal(err)
+	}
 	if got := waitFollowupID(t, f.ends); got != id {
 		t.Fatal("input was redirected", got)
 	}
@@ -172,8 +178,10 @@ func TestTalkInputReadyCancellationRetiresPreparation(t *testing.T) {
 	stop()
 	select {
 	case err := <-ready:
-		if err == nil { t.Fatal("cancelled preparation admitted capture") }
-	case <-time.After(3*time.Second):
+		if err == nil {
+			t.Fatal("cancelled preparation admitted capture")
+		}
+	case <-time.After(3 * time.Second):
 		t.Fatal("cancelled preparation did not settle")
 	}
 	requireNoInputAppend(t, f)
@@ -182,7 +190,9 @@ func TestTalkInputReadyCancellationRetiresPreparation(t *testing.T) {
 func TestTalkInputReadyNeverReplaysProtectedWindowPCM(t *testing.T) {
 	no := false
 	b, f, _, _ := inputReadyFixture(t, &no)
-	if err := b.Audio([]byte{1, 0}); err != nil { t.Fatal(err) }
+	if err := b.Audio([]byte{1, 0}); err != nil {
+		t.Fatal(err)
+	}
 	waitClaw(t, f.closed)
 	requireNoInputAppend(t, f)
 }
@@ -232,7 +242,7 @@ func TestTalkInputReadyRechecksCaptureConnectionAndSourceAfterWaiting(t *testing
 				if e == nil {
 					t.Fatal("changed capture/authority admitted")
 				}
-			case <-time.After(3*time.Second):
+			case <-time.After(3 * time.Second):
 				t.Fatal("changed preparation did not settle")
 			}
 			requireNoInputAppend(t, f)
@@ -284,7 +294,12 @@ func TestTalkFollowupWaitsBeforeCueCaptureAndOpeningSilenceDeadline(t *testing.T
 	no, yes := false, true
 	inputReadySnapshot(c.claw, 1, &no)
 	waiting := make(chan struct{}, 1)
-	c.claw.inputWaiting = func() { select { case waiting <- struct{}{}: default: } }
+	c.claw.inputWaiting = func() {
+		select {
+		case waiting <- struct{}{}:
+		default:
+		}
+	}
 	at := time.Unix(100, 0)
 	c.now = func() time.Time { return at }
 	capture := &numberedCapture{Source: mic.New(), frames: make(chan []int16), subscribed: make(chan struct{}), at: at}
@@ -295,7 +310,11 @@ func TestTalkFollowupWaitsBeforeCueCaptureAndOpeningSilenceDeadline(t *testing.T
 	if c.phase != phaseThinking || c.stopAudio != nil || c.captureCue != nil || c.noSpeech != nil || c.deadline == nil {
 		t.Fatal("protected window opened cue/capture or spent the opening-silence deadline")
 	}
-	select { case <-capture.subscribed: t.Fatal("microphone opened before native readiness"); default: }
+	select {
+	case <-capture.subscribed:
+		t.Fatal("microphone opened before native readiness")
+	default:
+	}
 	inputReadySnapshot(c.claw, 2, &yes)
 	c.handle(next(t, c, evClawCaptureReady))
 	waitClaw(t, capture.subscribed)
@@ -305,7 +324,9 @@ func TestTalkFollowupWaitsBeforeCueCaptureAndOpeningSilenceDeadline(t *testing.T
 	capture.mu.Lock()
 	history := capture.history
 	capture.mu.Unlock()
-	if history != 0 { t.Fatal("protected-window microphone history was replayed", history) }
+	if history != 0 {
+		t.Fatal("protected-window microphone history was replayed", history)
+	}
 	// Cancel uses the same owner while its sender and capture goroutines exist.
 	// It must not wait behind the readiness sender's scope lock.
 	c.handle(event{kind: evCancel})
@@ -317,7 +338,12 @@ func TestTalkCancelWhilePreparingDoesNotDeadlockOrAdmitLateCapture(t *testing.T)
 	no := false
 	inputReadySnapshot(c.claw, 1, &no)
 	waiting := make(chan struct{}, 1)
-	c.claw.inputWaiting = func() { select { case waiting <- struct{}{}: default: } }
+	c.claw.inputWaiting = func() {
+		select {
+		case waiting <- struct{}{}:
+		default:
+		}
+	}
 	c.handle(event{kind: evPlayed, reply: 41, at: time.Now()})
 	flushClawSends(t, c)
 	waitClaw(t, waiting)
@@ -340,7 +366,12 @@ func TestTalkQueuedCaptureReadyRechecksAvailabilityAndConnection(t *testing.T) {
 			flushClawSends(t, c)
 			ready := next(t, c, evClawCaptureReady)
 			waiting := make(chan struct{}, 1)
-			c.claw.inputWaiting = func() { select { case waiting <- struct{}{}: default: } }
+			c.claw.inputWaiting = func() {
+				select {
+				case waiting <- struct{}{}:
+				default:
+				}
+			}
 			if change == "connection" {
 				f.mu.Lock()
 				f.connection++
@@ -354,13 +385,19 @@ func TestTalkQueuedCaptureReadyRechecksAvailabilityAndConnection(t *testing.T) {
 			}
 			if change == "connection" {
 				waitFollowupID(t, f.closes)
-				if c.phase != phaseIdle { t.Fatal("changed connection did not close preparation") }
+				if c.phase != phaseIdle {
+					t.Fatal("changed connection did not close preparation")
+				}
 			} else {
 				waitClaw(t, waiting)
-				if c.phase != phaseThinking || c.deadline == nil { t.Fatal("lost readiness discarded preparation watchdog") }
+				if c.phase != phaseThinking || c.deadline == nil {
+					t.Fatal("lost readiness discarded preparation watchdog")
+				}
 				inputReadySnapshot(c.claw, 3, &yes)
 				c.handle(next(t, c, evClawCaptureReady))
-				if c.phase != phaseListening { t.Fatal("renewed readiness did not admit capture") }
+				if c.phase != phaseListening {
+					t.Fatal("renewed readiness did not admit capture")
+				}
 			}
 		})
 	}

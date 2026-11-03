@@ -137,8 +137,8 @@ func TestNativeReplyOpensFollowupOnlyAfterLocalPlaybackCompletes(t *testing.T) {
 		t.Fatal("server completion opened capture before local audio ended")
 	}
 	c.handle(event{kind: evPlayed, reply: 41, at: time.Now()})
- flushClawSends(t,c)
- c.handle(next(t,c,evClawCaptureReady))
+	flushClawSends(t, c)
+	c.handle(next(t, c, evClawCaptureReady))
 	if c.phase != phaseListening || !c.followUp || c.woke || c.noSpeech == nil {
 		t.Fatal("finished answer did not open a keyword-free follow-up")
 	}

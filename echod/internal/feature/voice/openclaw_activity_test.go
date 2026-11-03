@@ -229,8 +229,8 @@ func TestNativeActivityCannotEndLocallyBufferedReply(t *testing.T) {
 		t.Fatal("telemetry revoked local playback ownership")
 	}
 	c.handle(event{kind: evPlayed, reply: 41, at: time.Now()})
- flushClawSends(t,c)
- c.handle(next(t,c,evClawCaptureReady))
+	flushClawSends(t, c)
+	c.handle(next(t, c, evClawCaptureReady))
 	if c.phase != phaseListening || !c.followUp {
 		t.Fatal("local drain no longer owns followup")
 	}
@@ -403,7 +403,7 @@ func TestClawActivityCaptureIdentityChangesOnlyAtFollowup(t *testing.T) {
 	c.claw.mu.Unlock()
 	c.handle(event{kind: evPlayed, reply: 41, at: time.Now()})
 	flushClawSends(t, c)
- c.handle(next(t,c,evClawCaptureReady))
+	c.handle(next(t, c, evClawCaptureReady))
 	c.claw.mu.Lock()
 	second := c.claw.turn.captureID
 	c.claw.mu.Unlock()
@@ -434,7 +434,7 @@ func TestClawActivityCaptureIdentityChangesOnlyAtFollowup(t *testing.T) {
 	}
 	c.handle(event{kind: evPlayed, reply: 42, at: time.Now()})
 	flushClawSends(t, c)
- c.handle(next(t,c,evClawCaptureReady))
+	c.handle(next(t, c, evClawCaptureReady))
 	c.claw.mu.Lock()
 	third := c.claw.turn.captureID
 	c.claw.mu.Unlock()

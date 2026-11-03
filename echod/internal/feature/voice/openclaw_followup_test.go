@@ -180,7 +180,7 @@ func TestTalkConnectedFollowupKeepsLogicalIDAndSpokenAnswer(t *testing.T) {
 		t.Fatal("old reply completion ended the new capture")
 	}
 	flushClawSends(t, c)
- c.handle(next(t,c,evClawCaptureReady))
+	c.handle(next(t, c, evClawCaptureReady))
 	c.sendAudio(c.claw, []byte{2, 0}, c.clawSends)
 	c.sendClaw(c.clawSends, "yes boundary", c.claw.End)
 	flushClawSends(t, c)
@@ -213,7 +213,7 @@ func TestTalkConnectedFollowupEndsOnPrivacyErrorOrSilence(t *testing.T) {
 			c, f, id := connectedReply(t)
 			c.handle(event{kind: evPlayed, reply: 41, at: time.Now()})
 			flushClawSends(t, c)
- c.handle(next(t,c,evClawCaptureReady))
+			c.handle(next(t, c, evClawCaptureReady))
 			switch reason {
 			case "silence":
 				until := c.noSpeechUntil
