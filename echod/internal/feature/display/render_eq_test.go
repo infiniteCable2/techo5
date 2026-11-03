@@ -11,6 +11,23 @@ import (
 	"time"
 )
 
+func TestNativeActivityLabelPreservesShowAndShow8ControlPhase(t *testing.T) {
+	for _, panel := range []struct{ wide, high int }{{showWide, showHigh}, {show8Wide, show8High}} {
+		r := newRenderer(image.NewRGBA(image.Rect(0, 0, panel.wide, panel.high)))
+		for _, label := range []string{"Processing…", "Transcribing…", "Waiting…", "Thinking…"} {
+			s := scene{phase: "thinking", nativeStatus: label, eq: &eqView{}}
+			lines := r.eqWords(s, panel.high, panel.wide)
+			if len(lines) != 1 || lines[0].text != label || s.phase != "thinking" {
+				t.Fatal("native progress changed control phase or retained inferred label", label)
+			}
+		}
+		lines := r.eqWords(scene{phase: "thinking", eq: &eqView{}}, panel.high, panel.wide)
+		if len(lines) != 1 || lines[0].text != "Thinking…" {
+			t.Fatal("legacy label changed")
+		}
+	}
+}
+
 func eqScenes(now time.Time) map[string]scene {
 	listen, listenPk := eqVoice(0.62, 1)
 	reply, replyPk := eqVoice(0.95, 7)

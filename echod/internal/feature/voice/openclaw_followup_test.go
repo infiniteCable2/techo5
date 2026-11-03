@@ -21,17 +21,18 @@ import (
 // keyed by the returned logical Talk id, and close destroys that question.
 // It neither supplies a permission cache nor asserts server policy behavior.
 type followupGateway struct {
-	mu         sync.Mutex
-	calls      []clawCall
-	ends       chan string
-	closes     chan string
-	serial     int
-	connection uint64
-	ready      bool
-	pending    map[string]bool
-	confirmed  bool
-	input      map[string][]byte
-	failAppend bool
+	mu             sync.Mutex
+	calls          []clawCall
+	ends           chan string
+	closes         chan string
+	serial         int
+	connection     uint64
+	ready          bool
+	pending        map[string]bool
+	confirmed      bool
+	input          map[string][]byte
+	failAppend     bool
+	activityEvents bool
 }
 
 func newFollowupGateway() *followupGateway {
@@ -54,7 +55,7 @@ func (f *followupGateway) Call(_ context.Context, method string, params any, res
 	case "talk.session.create":
 		f.serial++
 		data, _ := json.Marshal(map[string]any{"sessionId": fmt.Sprintf("conversation-%d", f.serial), "readyMark": "media-ready:example", "audio": map[string]any{
-			"inputEncoding": "pcm16", "inputSampleRateHz": 16000, "outputEncoding": "pcm16", "outputSampleRateHz": 24000, "supportsInputEnd": true,
+			"inputEncoding": "pcm16", "inputSampleRateHz": 16000, "outputEncoding": "pcm16", "outputSampleRateHz": 24000, "supportsInputEnd": true, "activityEvents": f.activityEvents,
 		}})
 		return json.Unmarshal(data, result)
 	case "talk.session.appendAudio":
@@ -98,7 +99,7 @@ func waitFollowupID(t *testing.T, ch <-chan string) string {
 	}
 }
 
-func connectedReply(t *testing.T) (*conversation, *followupGateway, string) {
+func connectedReply(t *testing.T, activityEvents ...bool) (*conversation, *followupGateway, string) {
 	t.Helper()
 	c := thinkingTurn(t)
 	cfg := config.Get()
@@ -113,6 +114,7 @@ func connectedReply(t *testing.T) (*conversation, *followupGateway, string) {
 		t.Fatal(err)
 	}
 	f := newFollowupGateway()
+	f.activityEvents = len(activityEvents) > 0 && activityEvents[0]
 	ctx, cancel := context.WithCancel(context.Background())
 	c.claw.client, c.claw.ctx, c.claw.key = f, ctx, cfg.OpenClaw.SessionKey
 	c.claw.playbackReady = func() bool { return true }

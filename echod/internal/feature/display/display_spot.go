@@ -1427,19 +1427,20 @@ func (d *Display) frame() (next time.Duration) {
 	}
 	on, view, at := d.on, d.view, d.viewAt
 	s := roundScene{
-		now:       now,
-		phase:     view.Phase,
-		heard:     view.Heard,
-		reply:     view.Reply,
-		menuOpen:  d.menuOpen,
-		menuMode:  d.menuMode,
-		menuSel:   d.menuSel,
-		menuRot:   d.menuRot,
-		radioSel:  d.radioSel,
-		cameraSel: d.cameraSel,
-		radarOn:   d.radar,
-		sheetOpen: sheetOpen,
-		sheetGrid: sheetGrid,
+		now:          now,
+		phase:        view.Phase,
+		nativeStatus: view.NativeStatus,
+		heard:        view.Heard,
+		reply:        view.Reply,
+		menuOpen:     d.menuOpen,
+		menuMode:     d.menuMode,
+		menuSel:      d.menuSel,
+		menuRot:      d.menuRot,
+		radioSel:     d.radioSel,
+		cameraSel:    d.cameraSel,
+		radarOn:      d.radar,
+		sheetOpen:    sheetOpen,
+		sheetGrid:    sheetGrid,
 	}
 	quiet := d.quiet
 	if !d.volAt.IsZero() && now.Sub(d.volAt) < volumeShow {

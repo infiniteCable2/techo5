@@ -111,6 +111,8 @@ const (
 	evClawAudible                          // local speaker timeline, not transport receipt
 	evClawInputSpeech                      // a nonempty native partial transcript confirms input
 	evClawCaptionPosition                  // locally audible output, optional presentation only
+	evClawActivity                         // negotiated native input/work/output observation
+	evClawActivityEnd                      // quiet input settlement ordered after queued PCM
 )
 
 type event struct {
@@ -446,6 +448,7 @@ func newConversation(vs *esphome.VoiceSatellite) *conversation {
 	c.direct = newDirect(c.post)
 	c.realtime = newRealtime(c.postSure)
 	c.claw = newClaw(c.postSure)
+	c.claw.observe = c.post
 	c.be = c.ha
 
 	vs.OnPipelineEvent = c.pipeline
@@ -610,6 +613,14 @@ func (c *conversation) handle(e event) {
 
 func (c *conversation) turnEvent(e event) {
 	switch e.kind {
+	case evClawActivity:
+		if c.nativeTalk() {
+			c.showNativeActivity()
+		}
+	case evClawActivityEnd:
+		if c.nativeTalk() {
+			c.nativeActivityEnded()
+		}
 	case evClawClear:
 		c.nativeSpeaking = false
 		c.nativeAudible = false
@@ -1269,6 +1280,7 @@ func (c *conversation) think() {
 	c.arm(wakeword.MaxThink(c.slot))
 
 	c.showThinking()
+	c.showNativeActivity()
 }
 
 // speak moves to playing the reply. url is empty when it is arriving over the API instead.
@@ -1465,6 +1477,7 @@ func (c *conversation) enter(p phase) {
 	c.shown.Phase = p.String()
 	c.shown.PlaybackKnown = c.nativeTalk()
 	c.shown.Speaking = c.nativeTalk() && p == phaseReplying && c.nativeAudible
+	c.shown.NativeStatus = c.nativeProgressStatus()
 	Changed.Emit(c.shown)
 }
 

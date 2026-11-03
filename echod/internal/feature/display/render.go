@@ -41,7 +41,8 @@ var shade = color.RGBA{0x00, 0x00, 0x00, 0x90}
 
 // scene is one frame's worth of facts.
 type scene struct {
-	streaming bool // the camera is being streamed (feature/camstream)
+	nativeStatus string
+	streaming    bool // the camera is being streamed (feature/camstream)
 
 	now                     time.Time
 	phase                   string  // idle, listening, thinking, replying, lingering
@@ -718,7 +719,11 @@ func (r *renderer) draw(s scene) {
 			r.cornerClock(s)
 			r.words(s, r.s(70))
 		} else {
-			r.status(s, "Thinking…", true)
+			label := "Thinking…"
+			if s.nativeStatus != "" {
+				label = s.nativeStatus
+			}
+			r.status(s, label, true)
 			r.words(scene{heard: s.heard, now: s.now}, r.s(200))
 		}
 	case "replying", "lingering":
