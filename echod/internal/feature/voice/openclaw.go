@@ -48,6 +48,7 @@ type clawTurn struct {
 	id            string
 	input         chan clawInput
 	inputWake     chan struct{}
+	inputReady    bool // create contract and sink acknowledgement completed
 	inputEnded    bool
 	outputEnded   bool
 	followUpReady bool
@@ -526,6 +527,17 @@ func (b *clawBackend) transmit(t *clawTurn) {
 		fail("talk.session.acknowledgeMark")
 		return
 	}
+	b.mu.Lock()
+	if b.turn != t || t.ctx.Err() != nil {
+		b.mu.Unlock()
+		return
+	}
+	t.inputReady = true
+	select {
+	case t.inputWake <- struct{}{}:
+	default:
+	}
+	b.mu.Unlock()
 	var startedCapture string
 	for {
 		select {
@@ -533,8 +545,13 @@ func (b *clawBackend) transmit(t *clawTurn) {
 			return
 		case input := <-t.input:
 			if len(input.audio) > 0 && input.captureID != startedCapture {
-				if err := b.waitInputReady(t, input.captureID); err != nil {
-					fail(err.Error())
+				// The capture owner waits BEFORE cue/microphone admission. PCM
+				// recorded in a known protected window must never be replayed later.
+				b.mu.Lock()
+				blocked := t.activity.inputAvailable != nil && !*t.activity.inputAvailable
+				b.mu.Unlock()
+				if blocked {
+					fail("OpenClaw input is not available")
 					return
 				}
 			}

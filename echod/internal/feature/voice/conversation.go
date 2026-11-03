@@ -113,6 +113,7 @@ const (
 	evClawCaptionPosition                  // locally audible output, optional presentation only
 	evClawActivity                         // negotiated native input/work/output observation
 	evClawActivityEnd                      // quiet input settlement ordered after queued PCM
+	evClawCaptureReady                     // native media ready before cue and microphone admission
 )
 
 type event struct {
@@ -121,6 +122,7 @@ type event struct {
 	clawGeneration int            // fences events from a replaced native Talk session
 	clawPlayback   int            // playback epoch within that native session
 	clawSend       *clawSendScope // queued transport failure belongs to this local turn
+	capture        *nextTurn      // exact native capture awaiting admission
 	kind           eventKind
 	slot           int
 	text           string
@@ -614,6 +616,24 @@ func (c *conversation) handle(e event) {
 
 func (c *conversation) turnEvent(e event) {
 	switch e.kind {
+	case evClawCaptureReady:
+		if !c.nativeTalk() || c.phase != phaseThinking || e.clawSend != c.clawSends || e.capture == nil {
+			return
+		}
+		ready, err := c.claw.captureReady(e.clawGeneration)
+		if err != nil {
+			c.turnEvent(event{kind: evError, code: "openclaw-input-ready", msg: err.Error()})
+			return
+		}
+		if !ready {
+			c.prepareClawCapture(c.claw, e.clawSend, *e.capture)
+			return
+		}
+		c.opened = c.now()
+		if cue := wakeword.ChimeForCapture(c.slot, c.followUp); cue != nil {
+			c.captureCue = cue
+		}
+		c.listen(*e.capture)
 	case evClawActivity:
 		if c.nativeTalk() {
 			c.showNativeActivity()
@@ -1182,11 +1202,7 @@ func (c *conversation) start(n nextTurn) bool {
 	// told a follow-up should be silent: the microphone is open again with nothing said to say so. It
 	// is not a wake, though, so it does not report a phrase nobody spoke.
 	c.captureCue = nil
-	if c.nativeTalk() {
-		if cue := wakeword.ChimeForCapture(slot, n.followUp); cue != nil {
-			c.captureCue = cue
-		}
-	} else {
+	if !c.nativeTalk() {
 		wakeword.Chime(slot, n.followUp)
 	}
 	if !n.followUp {
@@ -1206,9 +1222,16 @@ func (c *conversation) start(n nextTurn) bool {
 			c.send("start", func() error { return rt.startFrom(gen) })
 		} else if claw, ok := be.(*clawBackend); ok {
 			c.clawSends = &clawSendScope{active: true}
+			scope := c.clawSends
 			gen := claw.generation()
 			selected := c.clawConfig
-			c.sendClaw(c.clawSends, "start", func() error { return claw.startInputFrom(gen, n.followUp, selected) })
+			c.sendClaw(scope, "start", func() error {
+				if err := claw.startInputFrom(gen, n.followUp, selected); err != nil {
+					return err
+				}
+				c.prepareClawCapture(claw, scope, n)
+				return nil
+			})
 		} else {
 			c.send("start", func() error { return be.Start(asked) })
 		}
@@ -1218,28 +1241,47 @@ func (c *conversation) start(n nextTurn) bool {
 	}
 
 	c.shown = State{}
-	c.enter(phaseListening)
-	c.turn.Listening()
 	c.reply = reply{}
 	c.nativeSpeaking = false
 	c.nativeAudible = false
 	c.nativeFinished = false
 
-	c.showListening()
-
 	if c.nativeTalk() {
-		// Opening silence has its own timer. Once speech begins, evSpeaking
-		// grants the configured maximum request length from that onset.
+		// Preparation is bounded by the existing thinking timeout. It consumes
+		// neither the opening-silence window nor any microphone history.
+		c.enter(phaseThinking)
+		c.arm(wakeword.MaxThink(c.slot))
+		c.showThinking()
+	} else {
+		c.listen(n)
+	}
+	// The phrase is logged for a follow-up too, because it is what chose the pipeline — not because
+	// anyone said it.
+	slog.Info("turn started", "slot", slot+1, "phrase", phrase, "follow_up", n.followUp, "on_ha", n.continued)
+	return true
+}
+
+func (c *conversation) listen(n nextTurn) {
+	c.enter(phaseListening)
+	c.turn.Listening()
+	c.showListening()
+	if c.nativeTalk() {
 		c.disarm()
 	} else {
 		c.arm(c.listenFor(n))
 	}
 	c.armNoSpeech()
-	c.startAudio(slot, n.followUp, n.continued, n.waited)
-	// The phrase is logged for a follow-up too, because it is what chose the pipeline — not because
-	// anyone said it.
-	slog.Info("turn started", "slot", slot+1, "phrase", phrase, "follow_up", n.followUp, "on_ha", n.continued)
-	return true
+	c.startAudio(n.slot, n.followUp, n.continued, n.waited)
+}
+
+func (c *conversation) prepareClawCapture(claw *clawBackend, scope *clawSendScope, n nextTurn) {
+	claw.prepareCapture(func(generation int, err error) {
+		e := event{kind: evClawCaptureReady, clawSend: scope, clawGeneration: generation, capture: &n}
+		if err != nil {
+			e.kind, e.code, e.msg = evError, "openclaw-input-ready", err.Error()
+		}
+		c.postSure(e)
+	})
 }
 
 // trigger is what opened the turn, for the event it ends with. A run Home Assistant's engine heard the
@@ -1743,8 +1785,9 @@ func (c *conversation) stream(ctx context.Context, be backend, slot int, followU
 				case <-timer.C:
 				}
 			}
-		} else if followUp {
-			// With no cue, a follow-up starts at admission, never in old TTS.
+		} else {
+			// A tone-free native input also starts at media admission, never
+			// by replaying microphone history from the protected window.
 			after = opened
 		}
 	}

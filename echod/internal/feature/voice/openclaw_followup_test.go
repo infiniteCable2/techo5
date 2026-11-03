@@ -168,7 +168,7 @@ func TestTalkConnectedFollowupKeepsLogicalIDAndSpokenAnswer(t *testing.T) {
 	c.sendAudio(c.claw, []byte{9, 0}, oldScope)
 	c.sendClaw(oldScope, "late end", c.claw.End)
 	c.handle(event{kind: evPlayed, reply: 41, at: time.Now()})
-	if c.phase != phaseListening || !c.followUp || c.clawSends == oldScope || oldScope.current() {
+	if c.phase != phaseThinking || !c.followUp || c.clawSends == oldScope || oldScope.current() {
 		t.Fatal("reply did not admit a fresh follow-up capture")
 	}
 	if c.claw.turn == nil || c.claw.turn.id != id || c.claw.generation() == gen {
@@ -176,10 +176,11 @@ func TestTalkConnectedFollowupKeepsLogicalIDAndSpokenAnswer(t *testing.T) {
 	}
 	c.handle(oldEnd)
 	c.handle(event{kind: evPlayed, reply: 41})
-	if c.phase != phaseListening {
+	if c.phase != phaseThinking {
 		t.Fatal("old reply completion ended the new capture")
 	}
 	flushClawSends(t, c)
+ c.handle(next(t,c,evClawCaptureReady))
 	c.sendAudio(c.claw, []byte{2, 0}, c.clawSends)
 	c.sendClaw(c.clawSends, "yes boundary", c.claw.End)
 	flushClawSends(t, c)
@@ -212,6 +213,7 @@ func TestTalkConnectedFollowupEndsOnPrivacyErrorOrSilence(t *testing.T) {
 			c, f, id := connectedReply(t)
 			c.handle(event{kind: evPlayed, reply: 41, at: time.Now()})
 			flushClawSends(t, c)
+ c.handle(next(t,c,evClawCaptureReady))
 			switch reason {
 			case "silence":
 				until := c.noSpeechUntil
@@ -356,7 +358,7 @@ func TestTalkTurnEndedProducerCannotRetagAfterPlaybackOpensFollowup(t *testing.T
 	b.mu.Lock()
 	queued := len(target.output)
 	b.mu.Unlock()
-	if c.phase != phaseListening || queued != 0 || c.shown.Heard == "old input" {
+	if c.phase != phaseThinking || queued != 0 || c.shown.Heard == "old input" {
 		t.Fatal("old native producer contaminated the next capture")
 	}
 }
@@ -366,8 +368,8 @@ func TestTalkFollowupRechecksSelectedRouteAndSinkAtQueuedAdmission(t *testing.T)
 		t.Run(reason, func(t *testing.T) {
 			c, f, id := connectedReply(t)
 			c.handle(event{kind: evPlayed, reply: 41, at: time.Now()})
-			if c.phase != phaseListening {
-				t.Fatal("follow-up offer was not admitted")
+			if c.phase != phaseThinking {
+				t.Fatal("follow-up offer was not prepared")
 			}
 			c.stopStreaming()
 			streams.Wait()

@@ -1,10 +1,14 @@
 package voice
 
-import "errors"
+import (
+	"errors"
+
+	"github.com/HuskerMinion/techo5/echod/internal/lib/safe"
+)
 
 // Input readiness is media backpressure, not permission to invoke an agent.
-// The existing copied-PCM FIFO owns buffering; its sender waits only before the
-// first PCM of a capture. Empty end markers and started captures keep their order.
+// Wait before the device cue and capture, never by holding protected-window PCM.
+// The waiter owns no sender/scope lock, so cancellation can retire it immediately.
 func (b *clawBackend) inputCurrentLocked(t *clawTurn, capture string) error {
 	if b.turn != t || t.ctx.Err() != nil {
 		return errors.New("OpenClaw input turn is closed")
@@ -27,6 +31,21 @@ func (b *clawBackend) inputCurrent(t *clawTurn, capture string) error {
 	return b.inputCurrentLocked(t, capture)
 }
 
+// The conversation rechecks the observed readiness at its actual cue/capture
+// boundary: an event queued while ready is not a lease on future readiness.
+func (b *clawBackend) captureReady(gen int) (bool, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	t := b.turn
+	if t == nil || t.generation != gen {
+		return false, errors.New("OpenClaw input turn changed")
+	}
+	if err := b.inputCurrentLocked(t, t.captureID); err != nil {
+		return false, err
+	}
+	return t.inputReady && (t.activity.inputAvailable == nil || *t.activity.inputAvailable), nil
+}
+
 func (b *clawBackend) waitInputReady(t *clawTurn, capture string) error {
 	for {
 		b.mu.Lock()
@@ -37,7 +56,7 @@ func (b *clawBackend) waitInputReady(t *clawTurn, capture string) error {
 		available := t.activity.inputAvailable
 		// Older activity-v1 implementations omit the additive observation. Keep
 		// their existing behavior; omission cannot erase a known false observation.
-		blocked := t.activity.supported && available != nil && !*available
+		blocked := !t.inputReady || t.activity.supported && available != nil && !*available
 		wake, waiting := t.inputWake, b.inputWaiting
 		b.mu.Unlock()
 		if !blocked {
@@ -52,4 +71,19 @@ func (b *clawBackend) waitInputReady(t *clawTurn, capture string) error {
 		case <-wake:
 		}
 	}
+}
+
+func (b *clawBackend) prepareCapture(notify func(int, error)) {
+	b.mu.Lock()
+	t := b.turn
+	if t == nil {
+		b.mu.Unlock()
+		notify(0, errors.New("OpenClaw input turn is closed"))
+		return
+	}
+	capture, gen := t.captureID, t.generation
+	b.mu.Unlock()
+	safe.Go("OpenClaw capture readiness", func() {
+		notify(gen, b.waitInputReady(t, capture))
+	})
 }

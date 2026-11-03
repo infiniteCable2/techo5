@@ -6,8 +6,10 @@ import (
 	"reflect"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/HuskerMinion/techo5/echod/internal/config"
+	"github.com/HuskerMinion/techo5/echod/internal/hardware/mic"
 )
 
 type inputReadyGateway struct {
@@ -99,26 +101,20 @@ func requireNoInputAppend(t *testing.T, f *inputReadyGateway) {
 	}
 }
 
-func TestTalkInputReadyBuffersCopiedPCMAndBoundaryUntilCurrentAvailability(t *testing.T) {
+func TestTalkInputReadyPreparesCaptureBeforeAdmittingPCM(t *testing.T) {
 	no, yes := false, true
 	b, f, waiting, _ := inputReadyFixture(t, &no)
-	pcm := []byte{1, 0, 2, 0}
-	if err := b.Audio(pcm); err != nil {
-		t.Fatal(err)
-	}
-	pcm[0] = 99
-	if err := b.End(); err != nil {
-		t.Fatal(err)
-	}
+	ready := make(chan error, 1)
+	b.prepareCapture(func(_ int, err error) { ready <- err })
 	waitClaw(t, waiting)
 	requireNoInputAppend(t, f)
 	b.mu.Lock()
 	id, capture := b.turn.id, b.turn.captureID
 	b.mu.Unlock()
-	ready := activitySnapshot("listening", "idle", 0, 0, 0)
-	ready.Input.Available = &yes
-	b.receive(activityPacket("another-session", 9, "session.activity", "", ready))
-	b.receive(activityPacket(id, 1, "session.activity", "", ready))
+	snapshot := activitySnapshot("listening", "idle", 0, 0, 0)
+	snapshot.Input.Available = &yes
+	b.receive(activityPacket("another-session", 9, "session.activity", "", snapshot))
+	b.receive(activityPacket(id, 1, "session.activity", "", snapshot))
 	inputReadySnapshot(b, 2, nil) // Missing telemetry cannot erase known backpressure.
 	b.mu.Lock()
 	blocked := b.turn.activity.inputAvailable != nil && !*b.turn.activity.inputAvailable
@@ -128,7 +124,22 @@ func TestTalkInputReadyBuffersCopiedPCMAndBoundaryUntilCurrentAvailability(t *te
 		t.Fatal("stale, wrong-session or omitted availability released input")
 	}
 	requireNoInputAppend(t, f)
+	select {
+	case err := <-ready:
+		t.Fatal("capture admitted inside protected window", err)
+	default:
+	}
 	inputReadySnapshot(b, 3, &yes)
+	select {
+	case err := <-ready:
+		if err != nil { t.Fatal(err) }
+	case <-time.After(3*time.Second):
+		t.Fatal("capture readiness did not settle")
+	}
+	pcm := []byte{1, 0, 2, 0}
+	if err := b.Audio(pcm); err != nil { t.Fatal(err) }
+	pcm[0] = 99
+	if err := b.End(); err != nil { t.Fatal(err) }
 	if got := waitFollowupID(t, f.ends); got != id {
 		t.Fatal("input was redirected", got)
 	}
@@ -152,17 +163,27 @@ func TestTalkInputReadyBuffersCopiedPCMAndBoundaryUntilCurrentAvailability(t *te
 	}
 }
 
-func TestTalkInputReadyCancellationClosesWithoutSendingBufferedInput(t *testing.T) {
+func TestTalkInputReadyCancellationRetiresPreparation(t *testing.T) {
 	no := false
 	b, f, waiting, stop := inputReadyFixture(t, &no)
-	if err := b.Audio([]byte{1, 0}); err != nil {
-		t.Fatal(err)
-	}
-	if err := b.End(); err != nil {
-		t.Fatal(err)
-	}
+	ready := make(chan error, 1)
+	b.prepareCapture(func(_ int, err error) { ready <- err })
 	waitClaw(t, waiting)
 	stop()
+	select {
+	case err := <-ready:
+		if err == nil { t.Fatal("cancelled preparation admitted capture") }
+	case <-time.After(3*time.Second):
+		t.Fatal("cancelled preparation did not settle")
+	}
+	requireNoInputAppend(t, f)
+}
+
+func TestTalkInputReadyNeverReplaysProtectedWindowPCM(t *testing.T) {
+	no := false
+	b, f, _, _ := inputReadyFixture(t, &no)
+	if err := b.Audio([]byte{1, 0}); err != nil { t.Fatal(err) }
+	waitClaw(t, f.closed)
 	requireNoInputAppend(t, f)
 }
 
@@ -186,16 +207,8 @@ func TestTalkInputReadyRechecksCaptureConnectionAndSourceAfterWaiting(t *testing
 		t.Run(change, func(t *testing.T) {
 			no, yes := false, true
 			b, f, waiting, _ := inputReadyFixture(t, &no)
-			failed := make(chan event, 4)
-			b.mu.Lock()
-			b.post = func(e event) { failed <- e }
-			b.mu.Unlock()
-			if err := b.Audio([]byte{1, 0}); err != nil {
-				t.Fatal(err)
-			}
-			if err := b.End(); err != nil {
-				t.Fatal(err)
-			}
+			failed := make(chan error, 1)
+			b.prepareCapture(func(_ int, err error) { failed <- err })
 			waitClaw(t, waiting)
 			switch change {
 			case "capture":
@@ -214,16 +227,15 @@ func TestTalkInputReadyRechecksCaptureConnectionAndSourceAfterWaiting(t *testing
 				b.mu.Unlock()
 				b.checkConnection()
 			}
-			waitClaw(t, f.closed)
-			requireNoInputAppend(t, f)
 			select {
 			case e := <-failed:
-				if e.kind != evError || e.code == "" {
-					t.Fatal("readiness failure was not visible", e)
+				if e == nil {
+					t.Fatal("changed capture/authority admitted")
 				}
-			default:
-				t.Fatal("readiness failure was silent")
+			case <-time.After(3*time.Second):
+				t.Fatal("changed preparation did not settle")
 			}
+			requireNoInputAppend(t, f)
 		})
 	}
 }
@@ -262,6 +274,93 @@ func TestTalkInputReadyKeepsLegacyAndStartedCaptureBehavior(t *testing.T) {
 			}
 			if appends != 3 {
 				t.Fatal("a started or legacy capture was interrupted", appends)
+			}
+		})
+	}
+}
+
+func TestTalkFollowupWaitsBeforeCueCaptureAndOpeningSilenceDeadline(t *testing.T) {
+	c, f, _ := connectedReply(t, true)
+	no, yes := false, true
+	inputReadySnapshot(c.claw, 1, &no)
+	waiting := make(chan struct{}, 1)
+	c.claw.inputWaiting = func() { select { case waiting <- struct{}{}: default: } }
+	at := time.Unix(100, 0)
+	c.now = func() time.Time { return at }
+	capture := &numberedCapture{Source: mic.New(), frames: make(chan []int16), subscribed: make(chan struct{}), at: at}
+	c.source = capture
+	c.handle(event{kind: evPlayed, reply: 41, at: at})
+	flushClawSends(t, c)
+	waitClaw(t, waiting)
+	if c.phase != phaseThinking || c.stopAudio != nil || c.captureCue != nil || c.noSpeech != nil || c.deadline == nil {
+		t.Fatal("protected window opened cue/capture or spent the opening-silence deadline")
+	}
+	select { case <-capture.subscribed: t.Fatal("microphone opened before native readiness"); default: }
+	inputReadySnapshot(c.claw, 2, &yes)
+	c.handle(next(t, c, evClawCaptureReady))
+	waitClaw(t, capture.subscribed)
+	if c.phase != phaseListening || c.noSpeech == nil || c.opened != at {
+		t.Fatal("ready capture did not enter listening with a fresh input boundary")
+	}
+	capture.mu.Lock()
+	history := capture.history
+	capture.mu.Unlock()
+	if history != 0 { t.Fatal("protected-window microphone history was replayed", history) }
+	// Cancel uses the same owner while its sender and capture goroutines exist.
+	// It must not wait behind the readiness sender's scope lock.
+	c.handle(event{kind: evCancel})
+	waitFollowupID(t, f.closes)
+}
+
+func TestTalkCancelWhilePreparingDoesNotDeadlockOrAdmitLateCapture(t *testing.T) {
+	c, f, _ := connectedReply(t, true)
+	no := false
+	inputReadySnapshot(c.claw, 1, &no)
+	waiting := make(chan struct{}, 1)
+	c.claw.inputWaiting = func() { select { case waiting <- struct{}{}: default: } }
+	c.handle(event{kind: evPlayed, reply: 41, at: time.Now()})
+	flushClawSends(t, c)
+	waitClaw(t, waiting)
+	scope, generation := c.clawSends, c.claw.generation()
+	c.handle(event{kind: evCancel})
+	waitFollowupID(t, f.closes)
+	c.handle(event{kind: evClawCaptureReady, clawSend: scope, clawGeneration: generation, capture: &nextTurn{followUp: true}})
+	if c.phase != phaseIdle || c.stopAudio != nil || c.noSpeech != nil || scope.current() {
+		t.Fatal("late readiness reopened a cancelled microphone")
+	}
+}
+
+func TestTalkQueuedCaptureReadyRechecksAvailabilityAndConnection(t *testing.T) {
+	for _, change := range []string{"availability", "connection"} {
+		t.Run(change, func(t *testing.T) {
+			c, f, _ := connectedReply(t, true)
+			yes, no := true, false
+			inputReadySnapshot(c.claw, 1, &yes)
+			c.handle(event{kind: evPlayed, reply: 41, at: time.Now()})
+			flushClawSends(t, c)
+			ready := next(t, c, evClawCaptureReady)
+			waiting := make(chan struct{}, 1)
+			c.claw.inputWaiting = func() { select { case waiting <- struct{}{}: default: } }
+			if change == "connection" {
+				f.mu.Lock()
+				f.connection++
+				f.mu.Unlock()
+			} else {
+				inputReadySnapshot(c.claw, 2, &no)
+			}
+			c.handle(ready)
+			if c.stopAudio != nil || c.captureCue != nil || c.noSpeech != nil {
+				t.Fatal("queued readiness opened cue/capture after its source changed")
+			}
+			if change == "connection" {
+				waitFollowupID(t, f.closes)
+				if c.phase != phaseIdle { t.Fatal("changed connection did not close preparation") }
+			} else {
+				waitClaw(t, waiting)
+				if c.phase != phaseThinking || c.deadline == nil { t.Fatal("lost readiness discarded preparation watchdog") }
+				inputReadySnapshot(c.claw, 3, &yes)
+				c.handle(next(t, c, evClawCaptureReady))
+				if c.phase != phaseListening { t.Fatal("renewed readiness did not admit capture") }
 			}
 		})
 	}
