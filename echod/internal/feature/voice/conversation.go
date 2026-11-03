@@ -168,7 +168,7 @@ type conversation struct {
 	claw     *clawBackend
 	be       backend
 
-	source  *mic.Source
+	source  captureSource
 	speaker *speaker.Player
 
 	// sound is who may make one. Everything audible goes through it, so canceling is one call
@@ -1791,7 +1791,7 @@ func (c *conversation) stream(ctx context.Context, be backend, slot int, followU
 	// hardwareTail is what the driver holds after the queue runs out.
 	var sounding time.Time
 	if wakeword.Tones(slot, followUp) {
-		sounding = time.Now().Add(wakeword.ChimeLength(slot, followUp) + speaker.HardwareTail)
+		sounding = c.now().Add(wakeword.ChimeLength(slot, followUp) + speaker.HardwareTail)
 	}
 	var held int
 
@@ -1841,7 +1841,7 @@ func (c *conversation) stream(ctx context.Context, be backend, slot int, followU
 			}
 
 			if !sounding.IsZero() {
-				if time.Now().Before(sounding) {
+				if c.now().Before(sounding) {
 					held += len(frame)
 					continue
 				}
