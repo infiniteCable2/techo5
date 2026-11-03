@@ -47,7 +47,9 @@ func TestNativeTranscriptKeepsRepeatedCaptureTailBeforeLocalEnd(t *testing.T) {
 		captureID := c.claw.turn.captureID
 		c.claw.mu.Unlock()
 		for _, previous := range captures {
-			if captureID == previous { t.Fatal("follow-up reused its capture identity") }
+			if captureID == previous {
+				t.Fatal("follow-up reused its capture identity")
+			}
 		}
 		captures = append(captures, captureID)
 		prefix, tail := int16(101+round*10), int16(102+round*10)
@@ -55,13 +57,17 @@ func TestNativeTranscriptKeepsRepeatedCaptureTailBeforeLocalEnd(t *testing.T) {
 			t.Helper()
 			select {
 			case capture.frames <- numberedPCM(value):
-			case <-time.After(3*time.Second): t.Fatal("native capture stopped consuming microphone frames")
+			case <-time.After(3 * time.Second):
+				t.Fatal("native capture stopped consuming microphone frames")
 			}
 			waitUntilT(t, func() bool {
-				f.mu.Lock(); defer f.mu.Unlock()
+				f.mu.Lock()
+				defer f.mu.Unlock()
 				frames := 0
 				for _, call := range f.calls {
-					if call.method == "talk.session.appendAudio" && call.params["captureId"] == captureID && call.params["endOfInput"] != true { frames++ }
+					if call.method == "talk.session.appendAudio" && call.params["captureId"] == captureID && call.params["endOfInput"] != true {
+						frames++
+					}
 				}
 				return frames == count
 			})
@@ -72,7 +78,11 @@ func TestNativeTranscriptKeepsRepeatedCaptureTailBeforeLocalEnd(t *testing.T) {
 		if c.phase != phaseListening || c.noSpeech != nil || c.deadline == nil {
 			t.Fatal("a completed utterance transcript cut off the open native capture")
 		}
-		select { case <-f.ends: t.Fatal("transcript submitted an early endOfInput"); default: }
+		select {
+		case <-f.ends:
+			t.Fatal("transcript submitted an early endOfInput")
+		default:
+		}
 		feed(tail, 2)
 		if round == 0 {
 			// The actual local endpoint event owns submission, not transcription.
@@ -95,30 +105,53 @@ func TestNativeTranscriptKeepsRepeatedCaptureTailBeforeLocalEnd(t *testing.T) {
 		var pcm []int16
 		ends := 0
 		for _, call := range calls {
-			if call.method != "talk.session.appendAudio" || call.params["captureId"] != captureID { continue }
-			if call.params["sessionId"] != id { t.Fatal("capture tail moved to another Talk") }
-			if call.params["endOfInput"] == true { ends++; continue }
-			if ends != 0 { t.Fatal("capture PCM followed its own end") }
+			if call.method != "talk.session.appendAudio" || call.params["captureId"] != captureID {
+				continue
+			}
+			if call.params["sessionId"] != id {
+				t.Fatal("capture tail moved to another Talk")
+			}
+			if call.params["endOfInput"] == true {
+				ends++
+				continue
+			}
+			if ends != 0 {
+				t.Fatal("capture PCM followed its own end")
+			}
 			body, err := base64.StdEncoding.DecodeString(call.params["audioBase64"].(string))
-			if err != nil || len(body) != nativeInputFrameSamples*2 { t.Fatal("invalid native capture frame", err) }
-			for i:=0; i<len(body); i+=2 { pcm=append(pcm,int16(uint16(body[i])|uint16(body[i+1])<<8)) }
+			if err != nil || len(body) != nativeInputFrameSamples*2 {
+				t.Fatal("invalid native capture frame", err)
+			}
+			for i := 0; i < len(body); i += 2 {
+				pcm = append(pcm, int16(uint16(body[i])|uint16(body[i+1])<<8))
+			}
 		}
-		wantEnds := 1-round
-		if creates != 1 || ends != wantEnds || !reflect.DeepEqual(pcm, numberedPCM(prefix,tail)) {
+		wantEnds := 1 - round
+		if creates != 1 || ends != wantEnds || !reflect.DeepEqual(pcm, numberedPCM(prefix, tail)) {
 			t.Fatal("transcript split, lost, repeated or reordered ongoing capture", creates, ends, len(pcm))
 		}
-		if round == 1 { break }
+		if round == 1 {
+			break
+		}
 		// Exercise the real reply/player claim before opening another capture.
 		for _, packet := range []string{
 			`{"sessionId":%q,"type":"event","talkEvent":{"type":"output.audio.started"}}`,
 			`{"sessionId":%q,"type":"audio","audioBase64":"AQACAA=="}`,
 			`{"sessionId":%q,"type":"event","talkEvent":{"type":"turn.ended"}}`,
-		} { c.claw.receive(json.RawMessage(fmt.Sprintf(packet,id))) }
-		for !c.nativeFinished { handleNext(t,c) }
-		waitUntilT(t,func()bool{return c.speaker.Queued()>0})
-		if c.phase != phaseReplying || c.pending != nil { t.Fatal("reply opened capture before local drain") }
+		} {
+			c.claw.receive(json.RawMessage(fmt.Sprintf(packet, id)))
+		}
+		for !c.nativeFinished {
+			handleNext(t, c)
+		}
+		waitUntilT(t, func() bool { return c.speaker.Queued() > 0 })
+		if c.phase != phaseReplying || c.pending != nil {
+			t.Fatal("reply opened capture before local drain")
+		}
 		c.speaker.Drain()
-		drained=next(t,c,evPlayed)
-		if c.phase != phaseReplying { t.Fatal("local drain event was bypassed") }
+		drained = next(t, c, evPlayed)
+		if c.phase != phaseReplying {
+			t.Fatal("local drain event was bypassed")
+		}
 	}
 }
