@@ -114,7 +114,9 @@ func connectedReply(t *testing.T, activityEvents ...bool) (*conversation, *follo
 		t.Fatal(err)
 	}
 	// This fixture tests transport/drain ownership, not a physical wake cue.
-	if err := config.Set().Wake(0).Tone(config.ToneNone); err != nil { t.Fatal(err) }
+	if err := config.Set().Wake(0).Tone(config.ToneNone); err != nil {
+		t.Fatal(err)
+	}
 	f := newFollowupGateway()
 	f.activityEvents = len(activityEvents) > 0 && activityEvents[0]
 	ctx, cancel := context.WithCancel(context.Background())

@@ -168,9 +168,9 @@ type conversation struct {
 	claw     *clawBackend
 	be       backend
 
-	source  captureSource
+	source     captureSource
 	captureCue captureCue
-	speaker *speaker.Player
+	speaker    *speaker.Player
 
 	// sound is who may make one. Everything audible goes through it, so canceling is one call
 	// wherever the sound came from.
@@ -1183,7 +1183,9 @@ func (c *conversation) start(n nextTurn) bool {
 	// is not a wake, though, so it does not report a phrase nobody spoke.
 	c.captureCue = nil
 	if c.nativeTalk() {
-		if cue := wakeword.ChimeForCapture(slot, n.followUp); cue != nil { c.captureCue = cue }
+		if cue := wakeword.ChimeForCapture(slot, n.followUp); cue != nil {
+			c.captureCue = cue
+		}
 	} else {
 		wakeword.Chime(slot, n.followUp)
 	}
@@ -1727,21 +1729,31 @@ func (c *conversation) stream(ctx context.Context, be backend, slot int, followU
 			var err error
 			after, err = cue.Wait(ctx)
 			if err != nil {
-				if ctx.Err() == nil { c.post(event{kind: evError, code: "openclaw-cue", clawSend: scope}) }
+				if ctx.Err() == nil {
+					c.post(event{kind: evError, code: "openclaw-cue", clawSend: scope})
+				}
 				return
 			}
 			if delay := after.Sub(c.now()); delay > 0 {
 				timer := time.NewTimer(delay)
 				defer timer.Stop()
-				select { case <-ctx.Done(): return; case <-timer.C: }
+				select {
+				case <-ctx.Done():
+					return
+				case <-timer.C:
+				}
 			}
 		} else if followUp {
 			// With no cue, a follow-up starts at admission, never in old TTS.
 			after = opened
 		}
 	}
-	if native && after.IsZero() && !opened.IsZero() { after = opened.Add(-mic.History) }
-	if ctx.Err() != nil { return }
+	if native && after.IsZero() && !opened.IsZero() {
+		after = opened.Add(-mic.History)
+	}
+	if ctx.Err() != nil {
+		return
+	}
 	var frames <-chan []int16
 	var pre []int16
 	var unlisten func()
@@ -1753,8 +1765,10 @@ func (c *conversation) stream(ctx context.Context, be backend, slot int, followU
 			return
 		}
 	} else {
-		history := mic.History+waited
-		if native && followUp { history = 0 }
+		history := mic.History + waited
+		if native && followUp {
+			history = 0
+		}
 		frames, pre, unlisten = c.source.ListenHistory("turn", history)
 	}
 	defer unlisten()

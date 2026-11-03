@@ -38,7 +38,9 @@ func Chime(slot int, followUp bool) {
 // ChimeForCapture observes the configured cue at its actual playback handoff.
 // It keeps the same overlay, audible fade allowance and hardware-tail policy.
 func ChimeForCapture(slot int, followUp bool) *speaker.Cue {
-	if !Tones(slot, followUp) { return nil }
+	if !Tones(slot, followUp) {
+		return nil
+	}
 	notes := speaker.WakeTone(toneFor(slot, followUp))
 	return speaker.Sound().ChimeCue(notes, speaker.Audible(notes, !config.Get().Microphone.Cancel))
 }

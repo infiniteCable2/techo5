@@ -25,27 +25,27 @@ const historySamples = 2 * Rate
 
 // history is a ring of the most recently captured mono samples.
 type history struct {
-	mu     sync.Mutex
-	buf    [historySamples]int16
-	at     int
-	filled bool
-	written uint64
-	spans [historySamples/FrameSamples + 1]captureSpan
+	mu                sync.Mutex
+	buf               [historySamples]int16
+	at                int
+	filled            bool
+	written           uint64
+	spans             [historySamples/FrameSamples + 1]captureSpan
 	spanAt, spanCount int
-	resetAt time.Time
+	resetAt           time.Time
 }
 
 // These are read-completion estimates, not hardware ADC timestamps. Keeping
 // whole frame spans avoids assigning old samples the time of a later snapshot.
 type captureSpan struct {
-	first uint64
-	count int
-	end time.Time
+	first  uint64
+	count  int
+	end    time.Time
 	broken bool
 }
 
 func (p captureSpan) start() time.Time {
-	return p.end.Add(-time.Duration(p.count)*time.Second/Rate)
+	return p.end.Add(-time.Duration(p.count) * time.Second / Rate)
 }
 
 func (h *history) add(frame []int16) {
@@ -55,7 +55,9 @@ func (h *history) add(frame []int16) {
 func (h *history) addAt(frame []int16, end time.Time) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if len(frame) == 0 { return }
+	if len(frame) == 0 {
+		return
+	}
 	p := captureSpan{first: h.written, count: len(frame), end: end}
 	if h.spanCount > 0 {
 		previous := h.spans[(h.spanAt+len(h.spans)-1)%len(h.spans)]
@@ -64,7 +66,7 @@ func (h *history) addAt(frame []int16, end time.Time) {
 		p.broken = !end.After(previous.end) || p.start().Sub(previous.end) > time.Second/50
 	}
 	h.spans[h.spanAt] = p
-	h.spanAt = (h.spanAt+1)%len(h.spans)
+	h.spanAt = (h.spanAt + 1) % len(h.spans)
 	h.spanCount = min(h.spanCount+1, len(h.spans))
 
 	for _, s := range frame {
@@ -120,26 +122,40 @@ func (h *history) since(after time.Time) ([]int16, error) {
 	if age < 0 || age > Confirming {
 		return nil, errors.New("microphone capture boundary is outside retained history")
 	}
-	if after.Before(h.resetAt) { return nil, errors.New("microphone capture boundary precedes capture restart") }
-	if h.spanCount == 0 { return nil, nil }
-	oldest := h.written-min(h.written, uint64(len(h.buf)))
+	if after.Before(h.resetAt) {
+		return nil, errors.New("microphone capture boundary precedes capture restart")
+	}
+	if h.spanCount == 0 {
+		return nil, nil
+	}
+	oldest := h.written - min(h.written, uint64(len(h.buf)))
 	var out []int16
 	covered := false
 	for i := range h.spanCount {
 		p := h.spans[(h.spanAt-h.spanCount+i+len(h.spans))%len(h.spans)]
-		if p.first < oldest { continue }
+		if p.first < oldest {
+			continue
+		}
 		if !covered {
-			if after.Before(p.start()) { return nil, errors.New("microphone capture boundary precedes retained frames") }
+			if after.Before(p.start()) {
+				return nil, errors.New("microphone capture boundary precedes retained frames")
+			}
 			covered = true
 		}
-		if p.broken && after.Before(p.start()) { return nil, errors.New("microphone capture boundary crosses a capture gap") }
+		if p.broken && after.Before(p.start()) {
+			return nil, errors.New("microphone capture boundary crosses a capture gap")
+		}
 		// The one frame straddling the cue boundary is deliberately omitted.
-		if p.start().Before(after) { continue }
+		if p.start().Before(after) {
+			continue
+		}
 		for j := range p.count {
 			out = append(out, h.buf[int((p.first+uint64(j))%uint64(len(h.buf)))])
 		}
 	}
-	if !covered { return nil, errors.New("microphone capture boundary has no retained frame coverage") }
+	if !covered {
+		return nil, errors.New("microphone capture boundary has no retained frame coverage")
+	}
 	return out, nil
 }
 
@@ -171,7 +187,9 @@ func (s *Source) ListenSince(name string, after time.Time) (<-chan []int16, []in
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	pre, err := s.history.since(after)
-	if err != nil { return nil, nil, nil, err }
+	if err != nil {
+		return nil, nil, nil, err
+	}
 	frames, unlisten := s.listenLocked(name, after)
 	return frames, pre, unlisten, nil
 }

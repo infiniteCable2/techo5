@@ -48,38 +48,57 @@ func TestListenHistoryJoinsOnce(t *testing.T) {
 func TestListenSinceJoinsAndRejectsUnavailableBoundary(t *testing.T) {
 	s := testSource()
 	s.mixer = &reusedBuffer{}
-	at := time.Now().Add(-200*time.Millisecond)
+	at := time.Now().Add(-200 * time.Millisecond)
 	s.broadcastAt(rawFrame(0, false), at.Add(20*time.Millisecond))
 	frames, pre, stop, err := s.ListenSince("absolute", at)
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer stop()
 	s.broadcastAt(rawFrame(1, false), at.Add(40*time.Millisecond))
-	if got := append(historyFrameNumbers(pre), (<-frames)[0]); !slices.Equal(got, []int16{1, 2}) { t.Fatal("absolute snapshot lost or repeated its boundary", got) }
-	stop()
-	for _, after := range []time.Time{time.Now().Add(-Confirming-time.Second), time.Now().Add(time.Minute)} {
-		if _, _, _, err := s.ListenSince("unavailable", after); err == nil { t.Fatal("unretained boundary was silently truncated") }
+	if got := append(historyFrameNumbers(pre), (<-frames)[0]); !slices.Equal(got, []int16{1, 2}) {
+		t.Fatal("absolute snapshot lost or repeated its boundary", got)
 	}
-	if len(s.listeners) != 0 { t.Fatal("rejected boundary left a listener") }
+	stop()
+	for _, after := range []time.Time{time.Now().Add(-Confirming - time.Second), time.Now().Add(time.Minute)} {
+		if _, _, _, err := s.ListenSince("unavailable", after); err == nil {
+			t.Fatal("unretained boundary was silently truncated")
+		}
+	}
+	if len(s.listeners) != 0 {
+		t.Fatal("rejected boundary left a listener")
+	}
 }
 
 func TestListenSinceDoesNotReclockPausedOrDelayedCapture(t *testing.T) {
 	s := testSource()
 	s.mixer = &reusedBuffer{}
-	at := time.Now().Add(-200*time.Millisecond)
+	at := time.Now().Add(-200 * time.Millisecond)
 	s.broadcastAt(rawFrame(0, false), at.Add(20*time.Millisecond))
-	cutoff := at.Add(100*time.Millisecond)
+	cutoff := at.Add(100 * time.Millisecond)
 	frames, pre, stop, err := s.ListenSince("paused", cutoff)
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer stop()
-	if len(pre) != 0 { t.Fatal("pre-cue frame was relabeled after the cutoff", historyFrameNumbers(pre)) }
+	if len(pre) != 0 {
+		t.Fatal("pre-cue frame was relabeled after the cutoff", historyFrameNumbers(pre))
+	}
 	// This read completed before the cutoff but reached the broadcaster late.
 	s.broadcastAt(rawFrame(1, false), cutoff.Add(-10*time.Millisecond))
-	select { case <-frames: t.Fatal("delayed pre-cue frame reached live capture"); default: }
+	select {
+	case <-frames:
+		t.Fatal("delayed pre-cue frame reached live capture")
+	default:
+	}
 	s.broadcastAt(rawFrame(2, false), cutoff.Add(20*time.Millisecond))
 	select {
 	case frame := <-frames:
-		if frame[0] != 3 { t.Fatal("first post-cue frame was lost", frame[0]) }
-	default: t.Fatal("post-cue frame did not reach live capture")
+		if frame[0] != 3 {
+			t.Fatal("first post-cue frame was lost", frame[0])
+		}
+	default:
+		t.Fatal("post-cue frame did not reach live capture")
 	}
 }
 
@@ -98,14 +117,20 @@ func TestListenSinceRequiresActualRetainedCoverage(t *testing.T) {
 				s.broadcastAt(rawFrame(1, false), at.Add(100*time.Millisecond))
 			case "restart":
 				s.broadcastAt(rawFrame(0, false), at.Add(20*time.Millisecond))
-				s.history.discontinue(at.Add(40*time.Millisecond))
+				s.history.discontinue(at.Add(40 * time.Millisecond))
 			case "ring-overwrite":
 				at = time.Now().Add(-Confirming)
-				cutoff = at.Add(10*time.Millisecond)
-				for i := range 101 { s.broadcastAt(rawFrame(i, false), at.Add(time.Duration(i+1)*20*time.Millisecond)) }
+				cutoff = at.Add(10 * time.Millisecond)
+				for i := range 101 {
+					s.broadcastAt(rawFrame(i, false), at.Add(time.Duration(i+1)*20*time.Millisecond))
+				}
 			}
-			if _, _, _, err := s.ListenSince("unavailable", cutoff); err == nil { t.Fatal("unproven prefix was silently accepted") }
-			if len(s.listeners) != 0 { t.Fatal("rejected boundary registered a listener") }
+			if _, _, _, err := s.ListenSince("unavailable", cutoff); err == nil {
+				t.Fatal("unproven prefix was silently accepted")
+			}
+			if len(s.listeners) != 0 {
+				t.Fatal("rejected boundary registered a listener")
+			}
 		})
 	}
 }
@@ -113,17 +138,25 @@ func TestListenSinceRequiresActualRetainedCoverage(t *testing.T) {
 func TestListenSinceKeepsFrameGranularJitterAndOmitsStraddlingFrame(t *testing.T) {
 	s := testSource()
 	s.mixer = &reusedBuffer{}
-	at := time.Now().Add(-200*time.Millisecond)
+	at := time.Now().Add(-200 * time.Millisecond)
 	s.broadcastAt(rawFrame(0, false), at.Add(20*time.Millisecond))
 	s.broadcastAt(rawFrame(1, false), at.Add(42*time.Millisecond))
 	_, pre, stop, err := s.ListenSince("jitter", at)
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	stop()
-	if got := historyFrameNumbers(pre); !slices.Equal(got, []int16{1, 2}) { t.Fatal("healthy frame jitter lost audio", got) }
+	if got := historyFrameNumbers(pre); !slices.Equal(got, []int16{1, 2}) {
+		t.Fatal("healthy frame jitter lost audio", got)
+	}
 	_, pre, stop, err = s.ListenSince("straddling", at.Add(10*time.Millisecond))
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer stop()
-	if got := historyFrameNumbers(pre); !slices.Equal(got, []int16{2}) { t.Fatal("cue-straddling frame was retained", got) }
+	if got := historyFrameNumbers(pre); !slices.Equal(got, []int16{2}) {
+		t.Fatal("cue-straddling frame was retained", got)
+	}
 }
 
 // Pause the real snapshot on history.mu. Capture must wait for the whole

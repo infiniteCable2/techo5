@@ -471,7 +471,9 @@ func (s *Source) broadcastAt(raw []byte, at time.Time) {
 	spectrum.Mic.Push(frame)
 
 	for _, l := range s.listeners {
-		if !l.after.IsZero() && at.Add(-time.Duration(len(frame))*time.Second/Rate).Before(l.after) { continue }
+		if !l.after.IsZero() && at.Add(-time.Duration(len(frame))*time.Second/Rate).Before(l.after) {
+			continue
+		}
 		select {
 		case l.ch <- frame:
 		default:

@@ -11,17 +11,17 @@ import (
 // means its audible prefix was handed to the device, with the hardware margin;
 // it neither claims the speaker nor schedules another audio producer.
 type Cue struct {
-	mu sync.Mutex
+	mu   sync.Mutex
 	done chan struct{}
-	end time.Time
-	err error
+	end  time.Time
+	err  error
 }
 
 type cueMark struct {
-	cue *Cue
+	cue       *Cue
 	remaining int // interleaved queue samples before the audible boundary
-	handed bool
-	after int // frames after that boundary in its final hardware period
+	handed    bool
+	after     int // frames after that boundary in its final hardware period
 }
 
 var errCueRetired = errors.New("speaker cue retired before its boundary")
@@ -29,7 +29,11 @@ var errCueRetired = errors.New("speaker cue retired before its boundary")
 func (c *Cue) finish(end time.Time, err error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	select { case <-c.done: return; default: }
+	select {
+	case <-c.done:
+		return
+	default:
+	}
 	c.end, c.err = end, err
 	close(c.done)
 }
@@ -37,7 +41,8 @@ func (c *Cue) finish(end time.Time, err error) {
 // Wait returns the original cue boundary, even when its consumer starts late.
 func (c *Cue) Wait(ctx context.Context) (time.Time, error) {
 	select {
-	case <-ctx.Done(): return time.Time{}, ctx.Err()
+	case <-ctx.Done():
+		return time.Time{}, ctx.Err()
 	case <-c.done:
 		c.mu.Lock()
 		defer c.mu.Unlock()
@@ -55,8 +60,13 @@ func (p *Player) retireCueLocked() {
 // Called with the same lock that takes the period from the playback queue.
 func (p *Player) takeCueLocked(take int) *cueMark {
 	mark := p.cue
-	if mark == nil || mark.handed { return nil }
-	if mark.remaining > take { mark.remaining -= take; return nil }
+	if mark == nil || mark.handed {
+		return nil
+	}
+	if mark.remaining > take {
+		mark.remaining -= take
+		return nil
+	}
 	mark.after = period - mark.remaining/Channels
 	mark.handed = true
 	return mark
@@ -65,10 +75,14 @@ func (p *Player) takeCueLocked(take int) *cueMark {
 // Only the real successful device handoff can complete a cue. A render alone,
 // or a queue drained/replaced while its period was in flight, cannot do so.
 func (p *Player) handedCue(mark *cueMark, at time.Time) {
-	if mark == nil { return }
+	if mark == nil {
+		return
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.cue != mark { return }
+	if p.cue != mark {
+		return
+	}
 	p.cue = nil
 	mark.cue.finish(at.Add(HardwareTail-time.Duration(mark.after)*time.Second/Rate), nil)
 }
@@ -90,7 +104,10 @@ func (p *Player) ChimeCue(level float64, audible time.Duration, notes ...Note) *
 	}
 	out := chimeSamples(level, notes...)
 	count := min(len(out), int(audible*time.Duration(Rate)/time.Second)*Channels)
-	if count <= 0 { cue.finish(time.Time{}, errors.New("speaker cue has no audible samples")); return cue }
+	if count <= 0 {
+		cue.finish(time.Time{}, errors.New("speaker cue has no audible samples"))
+		return cue
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if pb, _ := p.device(); pb == nil {
@@ -104,6 +121,8 @@ func (p *Player) ChimeCue(level float64, audible time.Duration, notes ...Note) *
 }
 
 func (d *Driver) ChimeCue(notes []Note, audible time.Duration) *Cue {
-	if d == nil || len(notes) == 0 { return nil }
+	if d == nil || len(notes) == 0 {
+		return nil
+	}
 	return d.p.ChimeCue(toneLevel, audible, notes...)
 }
