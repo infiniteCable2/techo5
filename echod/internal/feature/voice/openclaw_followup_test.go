@@ -33,7 +33,7 @@ type followupGateway struct {
 	input          map[string][]byte
 	failAppend     bool
 	activityEvents bool
-	inputEndMode string
+	inputEndMode   string
 }
 
 func newFollowupGateway() *followupGateway {
@@ -56,7 +56,9 @@ func (f *followupGateway) Call(_ context.Context, method string, params any, res
 	case "talk.session.create":
 		f.serial++
 		mode := f.inputEndMode
-		if mode == "" { mode = "client" }
+		if mode == "" {
+			mode = "client"
+		}
 		data, _ := json.Marshal(map[string]any{"sessionId": fmt.Sprintf("conversation-%d", f.serial), "readyMark": "media-ready:example", "audio": map[string]any{
 			"inputEncoding": "pcm16", "inputSampleRateHz": 16000, "outputEncoding": "pcm16", "outputSampleRateHz": 24000, "supportsInputEnd": true, "activityEvents": f.activityEvents, "inputEndMode": mode,
 		}})

@@ -17,17 +17,17 @@ type clawCall struct {
 	params map[string]any
 }
 type fakeClaw struct {
-	mu             sync.Mutex
-	calls          []clawCall
-	opened         chan struct{}
-	ended          chan struct{}
-	closed         chan struct{}
-	ready          bool
-	supportsEnd    bool
-	activityEvents bool
-	inputEndMode string
+	mu               sync.Mutex
+	calls            []clawCall
+	opened           chan struct{}
+	ended            chan struct{}
+	closed           chan struct{}
+	ready            bool
+	supportsEnd      bool
+	activityEvents   bool
+	inputEndMode     string
 	omitInputEndMode bool
-	events         chan gw.Event
+	events           chan gw.Event
 }
 
 func (f *fakeClaw) Ready() bool             { return f.ready }
@@ -45,11 +45,15 @@ func (f *fakeClaw) Call(ctx context.Context, method string, params any, result a
 			}
 		}
 		mode := f.inputEndMode
-		if mode == "" { mode = "client" }
+		if mode == "" {
+			mode = "client"
+		}
 		audio := map[string]any{
 			"inputEncoding": "pcm16", "inputSampleRateHz": 16000, "outputEncoding": "pcm16", "outputSampleRateHz": 24000, "supportsInputEnd": f.supportsEnd, "activityEvents": f.activityEvents, "inputEndMode": mode,
 		}
-		if f.omitInputEndMode { delete(audio, "inputEndMode") }
+		if f.omitInputEndMode {
+			delete(audio, "inputEndMode")
+		}
 		data, _ := json.Marshal(map[string]any{"sessionId": "test-session", "readyMark": "media-ready:test", "audio": audio})
 		return json.Unmarshal(data, result)
 	}
